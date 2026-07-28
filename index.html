@@ -3,7 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>🎮 استیکمن آنلاین (Trystero)</title>
+    <title>🎮 استیکمن آنلاین (CDN)</title>
+    <!-- کتابخانه Trystero با روش قدیمی -->
+    <script src="https://cdn.jsdelivr.net/npm/trystero@0.21.3/dist/trystero.umd.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
         body {
@@ -127,19 +129,16 @@
     </div>
 </div>
 
-<script type="importmap">
-{
-    "imports": {
-        "trystero": "https://cdn.jsdelivr.net/npm/trystero@0.21.3/dist/trystero.mjs"
+<script>
+    // ============================================================
+    //  🚀 Trystero با روش UMD (سازگار با همه مرورگرها)
+    // ============================================================
+    
+    // بررسی اینکه کتابخانه بارگذاری شده
+    if (typeof Trystero === 'undefined') {
+        document.getElementById('statusText').textContent = '❌ خطا: کتابخانه بارگذاری نشد';
+        console.error('Trystero بارگذاری نشد!');
     }
-}
-</script>
-
-<script type="module">
-    // ============================================================
-    //  🚀 Trystero - اتصال خودکار P2P بدون سرور
-    // ============================================================
-    import { joinRoom } from 'trystero';
 
     // ---------------------------------------------
     //  متغیرهای بازی
@@ -178,7 +177,7 @@
     // ============================================================
     //  توابع رسم
     // ============================================================
-    function drawStickman(cx, cy, color = '#1a2639', isMe = false, host = false) {
+    function drawStickman(cx, cy, color = '#1a2639', isMe = false) {
         ctx.save();
         ctx.strokeStyle = color;
         ctx.lineWidth = 3;
@@ -264,71 +263,124 @@
     }
 
     // ============================================================
-    //  Trystero - اتصال خودکار
+    //  Trystero - اتصال خودکار (نسخه UMD)
     // ============================================================
     function connectToRoom() {
-        statusText.textContent = '🔄 در حال اتصال...';
-        
-        // فقط یه اسم اتاق و appId مشخص کن - بقیه خودکاره！
-        room = joinRoom({ 
-            appId: 'stickman-game', 
-            // اینا برای مقاومت در برابر فیلتر
-            network: ['nostr', 'mqtt', 'bittorrent'] 
-        }, 'stickman-room');
+        try {
+            statusText.textContent = '🔄 در حال اتصال...';
+            
+            // استفاده از Trystero با روش UMD
+            const { joinRoom } = Trystero;
+            
+            room = joinRoom({ 
+                appId: 'stickman-game',
+                network: ['nostr', 'mqtt', 'bittorrent']
+            }, 'stickman-room');
 
-        // ID خودمون رو بگیریم
-        myId = room.selfId;
-        console.log('🔑 ID من:', myId);
+            myId = room.selfId;
+            console.log('🔑 ID من:', myId);
 
-        // وقتی بازیکن جدیدی وارد اتاق شد
-        room.onPeerJoin((peerId) => {
-            console.log('👤 بازیکن جدید:', peerId);
-            statusText.textContent = `👤 بازیکن جدید: ${peerId.substring(0, 6)}...`;
+            room.onPeerJoin((peerId) => {
+                console.log('👤 بازیکن جدید:', peerId);
+                statusText.textContent = `👤 بازیکن جدید وصل شد`;
+                setTimeout(() => {
+                    statusText.textContent = `🎮 ${Object.keys(players).length + 1} بازیکن`;
+                }, 1000);
+            });
+
+            room.onPeerLeave((peerId) => {
+                console.log('❌ بازیکن رفت:', peerId);
+                delete players[peerId];
+                statusText.textContent = `❌ بازیکن رفت`;
+                setTimeout(() => {
+                    statusText.textContent = `🎮 ${Object.keys(players).length} بازیکن`;
+                }, 1000);
+            });
+
+            room.onData('position', (data, peerId) => {
+                if (peerId !== myId) {
+                    players[peerId] = {
+                        x: data.x,
+                        y: data.y,
+                        color: data.color || '#ff5722'
+                    };
+                }
+            });
+
+            isConnected = true;
+            statusText.textContent = '✅ متصل شد! 🎮';
+            
+            players[myId] = { x: myX, y: myY, color: myColor };
+            sendMyPosition();
+
+        } catch (err) {
+            console.error('❌ خطا در اتصال:', err);
+            statusText.textContent = '❌ خطا: ' + err.message;
+            
+            // تلاش مجدد با روش جایگزین
             setTimeout(() => {
-                statusText.textContent = `🎮 ${Object.keys(players).length + 1} بازیکن`;
-            }, 1500);
-        });
-
-        // وقتی بازیکنی رفت
-        room.onPeerLeave((peerId) => {
-            console.log('❌ بازیکن رفت:', peerId);
-            delete players[peerId];
-            statusText.textContent = `❌ بازیکن رفت`;
-            setTimeout(() => {
-                statusText.textContent = `🎮 ${Object.keys(players).length} بازیکن`;
-            }, 1000);
-        });
-
-        // دریافت داده‌ها
-        room.onData('position', (data, peerId) => {
-            if (peerId !== myId) {
-                players[peerId] = {
-                    x: data.x,
-                    y: data.y,
-                    color: data.color || '#ff5722'
-                };
-            }
-        });
-
-        // اتصال برقرار شد
-        isConnected = true;
-        statusText.textContent = '✅ متصل شد! 🎮';
-        
-        // خودمون رو به لیست اضافه می‌کنیم
-        players[myId] = { x: myX, y: myY, color: myColor };
-        
-        // ارسال موقعیت اولیه
-        sendMyPosition();
+                if (!isConnected) {
+                    statusText.textContent = '🔄 تلاش مجدد...';
+                    connectToRoomFallback();
+                }
+            }, 3000);
+        }
     }
 
-    // ارسال موقعیت به همه
+    // روش جایگزین با شبکه‌های مختلف
+    function connectToRoomFallback() {
+        try {
+            const { joinRoom } = Trystero;
+            
+            room = joinRoom({ 
+                appId: 'stickman-game',
+                network: ['mqtt', 'nostr']
+            }, 'stickman-room-fallback');
+
+            myId = room.selfId;
+            console.log('🔑 ID من (fallback):', myId);
+
+            room.onPeerJoin((peerId) => {
+                console.log('👤 بازیکن جدید (fallback):', peerId);
+                statusText.textContent = `👤 بازیکن جدید وصل شد`;
+            });
+
+            room.onPeerLeave((peerId) => {
+                delete players[peerId];
+            });
+
+            room.onData('position', (data, peerId) => {
+                if (peerId !== myId) {
+                    players[peerId] = {
+                        x: data.x,
+                        y: data.y,
+                        color: data.color || '#ff5722'
+                    };
+                }
+            });
+
+            isConnected = true;
+            statusText.textContent = '✅ متصل شد! 🎮';
+            players[myId] = { x: myX, y: myY, color: myColor };
+            sendMyPosition();
+
+        } catch (err) {
+            console.error('❌ خطا در fallback:', err);
+            statusText.textContent = '❌ اتصال ممکن نیست';
+        }
+    }
+
     function sendMyPosition() {
         if (!room || !isConnected) return;
-        room.broadcast('position', {
-            x: myX,
-            y: myY,
-            color: myColor
-        });
+        try {
+            room.broadcast('position', {
+                x: myX,
+                y: myY,
+                color: myColor
+            });
+        } catch (err) {
+            console.log('خطا در ارسال:', err);
+        }
     }
 
     // ============================================================
@@ -430,19 +482,31 @@
     // ============================================================
     //  راه‌اندازی نهایی
     // ============================================================
-    connectToRoom();
+    // منتظر می‌مانیم تا کتابخانه بارگذاری شود
+    if (typeof Trystero !== 'undefined') {
+        connectToRoom();
+    } else {
+        statusText.textContent = '⏳ در حال بارگذاری کتابخانه...';
+        // بررسی مجدد بعد از ۲ ثانیه
+        setTimeout(() => {
+            if (typeof Trystero !== 'undefined') {
+                connectToRoom();
+            } else {
+                statusText.textContent = '❌ کتابخانه بارگذاری نشد. اینترنت را بررسی کن.';
+            }
+        }, 3000);
+    }
+
     gameLoop();
 
-    // ارسال موقعیت هر 50 میلی‌ثانیه
+    // ارسال موقعیت هر ۵۰ میلی‌ثانیه
     setInterval(() => {
         if (isConnected) {
             sendMyPosition();
         }
     }, 50);
 
-    console.log('🎮 بازی با Trystero راه‌اندازی شد!');
-    console.log('✅ بدون نیاز به سرور، کد یا اسکن');
-    console.log('✅ همه چیز خودکار است');
+    console.log('🎮 بازی با Trystero (نسخه UMD) راه‌اندازی شد!');
 </script>
 </body>
 </html>
