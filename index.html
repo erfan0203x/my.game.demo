@@ -2,7 +2,7 @@
 <html lang="fa" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>🎮 استیکمن آنلاین P2P</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
@@ -23,6 +23,7 @@
             border-radius: 32px;
             box-shadow: 0 20px 60px rgba(0,0,0,0.8);
             position: relative;
+            max-width: 100%;
         }
         #gameCanvas {
             display: block;
@@ -30,6 +31,9 @@
             border-radius: 16px;
             width: 600px;
             height: 400px;
+            max-width: 100%;
+            height: auto;
+            aspect-ratio: 600/400;
             box-shadow: inset 0 0 0 2px #0f3460;
             touch-action: none;
             cursor: default;
@@ -99,8 +103,7 @@
         }
         @media (max-width: 650px) {
             .game-wrapper { padding: 10px; border-radius: 20px; }
-            #gameCanvas { width: 100%; height: auto; aspect-ratio: 600/400; }
-            .joystick-zone { width: 110px; height: 110px; bottom: 20px; left: 20px; }
+            .joystick-zone { width: 100px; height: 100px; bottom: 20px; left: 20px; }
             .joystick-thumb { width: 50px; height: 50px; }
         }
     </style>
@@ -144,6 +147,8 @@
     let hostConnection = null;
     let players = {};
     let isConnected = false;
+    let isConnecting = false;
+    let hostCheckDone = false;
 
     // ---- جوی‌استیک ----
     const joystickZone = document.getElementById('joystickZone');
@@ -234,7 +239,9 @@
         for (let id in players) {
             if (id === myPeerId) continue;
             const p = players[id];
-            drawStickman(p.x, p.y, p.color, false);
+            if (p && typeof p.x === 'number') {
+                drawStickman(p.x, p.y, p.color, false);
+            }
         }
 
         drawStickman(myX, myY, myColor, isHost);
@@ -244,13 +251,16 @@
     }
 
     // ============================================================
-    //  منطق شبکه (نسخه نهایی با مدیریت بهتر هاست)
+    //  منطق شبکه - نسخه مخصوص موبایل
     // ============================================================
     function initPeer() {
         if (peer) {
             peer.destroy();
             peer = null;
         }
+
+        isConnecting = true;
+        statusText.textContent = '🔄 در حال راه‌اندازی...';
 
         peer = new Peer(undefined, {
             config: {
@@ -266,43 +276,39 @@
             myPeerId = id;
             statusText.textContent = `🆔 ${id}`;
             console.log('🔑 Peer ID:', id);
-
-            // ابتدا سعی می‌کنیم به هاست متصل شویم
-            tryConnectToHost();
-
-            // اگر هاست وجود نداشته باشد، بعد از 3 ثانیه خودمان هاست می‌شویم
-            setTimeout(() => {
-                if (!isHost && !hostConnection && !isConnected) {
-                    console.log('⏰ هاست پیدا نشد، تبدیل به هاست...');
-                    becomeHost();
-                }
-            }, 3000);
+            isConnecting = false;
+            
+            if (!isHost) {
+                // سعی می‌کنیم به هاست وصل بشیم
+                tryConnectToHost();
+            } else {
+                players[myPeerId] = { x: myX, y: myY, color: myColor };
+                broadcastState();
+            }
         });
 
         peer.on('error', (err) => {
             console.error('❌ Peer error:', err);
+            isConnecting = false;
+            
             if (err.type === 'unavailable-id' || err.message.includes('ID taken')) {
-                // هاست از قبل وجود دارد، سعی می‌کنیم به آن وصل شویم
                 statusText.textContent = '🔄 هاست موجود است، در حال اتصال...';
                 if (!isHost) {
                     setTimeout(() => tryConnectToHost(), 1000);
                 }
             } else if (err.type === 'peer-unavailable') {
-                // هاست پیدا نشد، خودمان هاست می‌شویم
                 becomeHost();
             } else {
-                // خطای دیگر
-                if (!isConnected) {
-                    setTimeout(() => initPeer(), 3000);
-                }
+                statusText.textContent = '⚠️ خطا، تلاش مجدد...';
+                setTimeout(() => {
+                    if (!isConnected) initPeer();
+                }, 3000);
             }
         });
 
         peer.on('connection', (conn) => {
             if (isHost) {
                 handleNewConnection(conn);
-            } else {
-                console.log('🔗 اتصال ورودی غیرمنتظره از:', conn.peer);
             }
         });
     }
@@ -310,22 +316,29 @@
     function tryConnectToHost() {
         if (isHost) return;
         if (hostConnection && hostConnection.open) return;
+        if (isConnecting) return;
 
         console.log('🔗 تلاش برای اتصال به هاست (ID: host)...');
+        statusText.textContent = '🔗 در حال اتصال به هاست...';
+        isConnecting = true;
+
         const conn = peer.connect('host', { reliable: true });
 
-        const timeout = setTimeout(() => {
+        // تایم‌اوت برای اتصال به هاست
+        const timeoutId = setTimeout(() => {
             if (!conn.open) {
                 console.log('⏰ تایم‌اوت اتصال به هاست');
                 conn.close();
+                isConnecting = false;
                 if (!isHost && !isConnected) {
                     becomeHost();
                 }
             }
-        }, 4000);
+        }, 8000);
 
         conn.on('open', () => {
-            clearTimeout(timeout);
+            clearTimeout(timeoutId);
+            isConnecting = false;
             isHost = false;
             hostConnection = conn;
             isConnected = true;
@@ -334,7 +347,7 @@
 
             conn.on('data', (data) => {
                 if (data.type === 'state') {
-                    players = data.players;
+                    players = data.players || {};
                     if (!players[myPeerId]) {
                         players[myPeerId] = { x: myX, y: myY, color: myColor };
                         sendMyPosition();
@@ -354,7 +367,8 @@
         });
 
         conn.on('error', (err) => {
-            clearTimeout(timeout);
+            clearTimeout(timeoutId);
+            isConnecting = false;
             console.log('❌ خطا در اتصال به هاست:', err);
             if (!isHost && !isConnected) {
                 becomeHost();
@@ -364,9 +378,13 @@
 
     function becomeHost() {
         if (isHost) return;
+        if (isConnecting) return;
+        
         console.log('👑 تبدیل به هاست...');
+        statusText.textContent = '👑 تبدیل به هاست...';
         isHost = true;
         isConnected = true;
+        isConnecting = false;
 
         if (peer) {
             peer.destroy();
