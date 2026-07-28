@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>🎮 استیکمن آنلاین P2P</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+        body {
+            background: #1a1a2e;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            touch-action: none;
+            overflow: hidden;
+        }
+        .game-wrapper {
+            background: #16213e;
+            padding: 20px;
+            border-radius: 32px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.8);
+            position: relative;
+        }
+        #gameCanvas {
+            display: block;
+            background-color: #eef2f7;
+            border-radius: 16px;
+            width: 600px;
+            height: 400px;
+            box-shadow: inset 0 0 0 2px #0f3460;
+            touch-action: none;
+            cursor: default;
+        }
+        .joystick-zone {
+            position: absolute;
+            bottom: 40px;
+            left: 40px;
+            width: 130px;
+            height: 130px;
+            touch-action: none;
+            z-index: 10;
+            background: rgba(255,255,255,0.15);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border-radius: 50%;
+            border: 2px solid rgba(255,255,255,0.25);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .joystick-thumb {
+            width: 60px;
+            height: 60px;
+            background: radial-gradient(circle at 30% 30%, #ffd700, #e6a800);
+            border-radius: 50%;
+            box-shadow: 0 4px 15px rgba(255,215,0,0.5), inset 0 -3px 0 rgba(0,0,0,0.2);
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            transition: box-shadow 0.1s;
+            pointer-events: none;
+            touch-action: none;
+        }
+        .joystick-zone.active .joystick-thumb {
+            box-shadow: 0 0 30px rgba(255,215,0,0.8), inset 0 -3px 0 rgba(0,0,0,0.2);
+        }
+        .info-bar {
+            margin-top: 16px;
+            color: #a8b2d1;
+            text-align: center;
+            font-size: 14px;
+            background: #0f172a;
+            padding: 10px 20px;
+            border-radius: 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .info-bar .badge {
+            background: #2d3748;
+            padding: 2px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+        }
+        #statusText {
+            color: #f1c40f;
+            font-weight: 600;
+        }
+        #posStatus {
+            color: #cbd5e1;
+            font-size: 13px;
+        }
+        @media (max-width: 650px) {
+            .game-wrapper { padding: 10px; border-radius: 20px; }
+            #gameCanvas { width: 100%; height: auto; aspect-ratio: 600/400; }
+            .joystick-zone { width: 110px; height: 110px; bottom: 20px; left: 20px; }
+            .joystick-thumb { width: 50px; height: 50px; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="game-wrapper">
+    <canvas id="gameCanvas" width="600" height="400"></canvas>
+
+    <div class="joystick-zone" id="joystickZone">
+        <div class="joystick-thumb" id="joystickThumb"></div>
+    </div>
+
+    <div class="info-bar">
+        <div>🕹️ <span id="statusText">در حال اتصال...</span></div>
+        <div class="badge">⌨️ فلش‌ها / WASD</div>
+        <div id="posStatus">📍 (300, 200)</div>
+    </div>
+</div>
+
+<script>
+    // ----- متغیرهای پایه -----
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const posStatus = document.getElementById('posStatus');
+    const statusText = document.getElementById('statusText');
+
+    const W = 600, H = 400;
+    const PADDING = 30;
+    const SPEED = 4.5;
+    const MARGIN = 25;
+
+    // موقعیت خود بازیکن (همیشه در مرکز شروع می‌شود)
+    let myX = W/2, myY = H/2;
+    let myColor = '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0');
+
+    // ---- متغیرهای شبکه ----
+    let peer = null;
+    let isHost = false;
+    let connections = [];
+    let myPeerId = null;
+    let hostConnection = null;
+    let players = {};          // بازیکنان دیگر (از هاست دریافت می‌شود)
+    let isConnected = false;
+
+    // ---- جوی‌استیک لمسی ----
+    const joystickZone = document.getElementById('joystickZone');
+    const joystickThumb = document.getElementById('joystickThumb');
+    let isDragging = false;
+    let joyX = 0, joyY = 0;
+
+    // ---- کیبورد ----
+    const keys = {
+        ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false,
+        w: false, a: false, s: false, d: false
+    };
+
+    // ============================================================
+    //  توابع رسم
+    // ============================================================
+    function drawStickman(cx, cy, color = '#1a2639', showCrown = false) {
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // سر
+        ctx.beginPath();
+        ctx.arc(cx, cy - 22, 16, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffe0b0';
+        ctx.fill();
+        ctx.stroke();
+
+        // چشم
+        ctx.fillStyle = '#1a2639';
+        ctx.beginPath();
+        ctx.arc(cx - 6, cy - 26, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(cx + 6, cy - 26, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        // بدن
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - 6);
+        ctx.lineTo(cx, cy + 18);
+        ctx.stroke();
+
+        // دست‌ها
+        ctx.beginPath();
+        ctx.moveTo(cx - 18, cy + 2);
+        ctx.lineTo(cx + 18, cy + 2);
+        ctx.stroke();
+
+        // پاها
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + 18);
+        ctx.lineTo(cx - 14, cy + 40);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + 18);
+        ctx.lineTo(cx + 14, cy + 40);
+        ctx.stroke();
+
+        // کفش
+        ctx.fillStyle = '#d32f2f';
+        ctx.beginPath();
+        ctx.ellipse(cx - 14, cy + 41, 6, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(cx + 14, cy + 41, 6, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // اگر هاست باشد، تاج بکش
+        if (showCrown) {
+            ctx.fillStyle = '#ffd700';
+            ctx.font = '20px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('👑', cx, cy - 45);
+        }
+
+        ctx.restore();
+    }
+
+    function drawScene() {
+        ctx.clearRect(0, 0, W, H);
+
+        // فضای کوچک (کادر آبی)
+        ctx.save();
+        ctx.strokeStyle = '#2979ff';
+        ctx.lineWidth = 3;
+        ctx.shadowColor = '#2979ff40';
+        ctx.shadowBlur = 12;
+        ctx.strokeRect(PADDING, PADDING, W - (PADDING*2), H - (PADDING*2));
+        ctx.fillStyle = '#e3f2fd20';
+        ctx.fillRect(PADDING, PADDING, W - (PADDING*2), H - (PADDING*2));
+        ctx.restore();
+
+        // 1. رسم سایر بازیکنان (از لیست players)
+        for (let id in players) {
+            if (id === myPeerId) continue;
+            const p = players[id];
+            drawStickman(p.x, p.y, p.color, false);
+        }
+
+        // 2. رسم خود بازیکن (همیشه، حتی اگر در players نباشد)
+        drawStickman(myX, myY, myColor, isHost);
+
+        // به‌روزرسانی متن وضعیت
+        const playerCount = Object.keys(players).length + 1;
+        posStatus.textContent = `📍 (${Math.round(myX)}, ${Math.round(myY)})  |  بازیکنان: ${playerCount}`;
+    }
+
+    // ============================================================
+    //  منطق شبکه (PeerJS)
+    // ============================================================
+    function initPeer() {
+        peer = new Peer(undefined, {
+            config: { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }] }
+        });
+
+        peer.on('open', (id) => {
+            myPeerId = id;
+            statusText.textContent = `🆔 ${id}`;
+            console.log('Peer ID:', id);
+            tryConnectToHost();
+        });
+
+        peer.on('error', (err) => {
+            console.error('Peer error:', err);
+            if (err.type === 'unavailable-id' || err.message.includes('ID taken')) {
+                statusText.textContent = '🔄 تلاش مجدد...';
+                setTimeout(() => { peer.destroy(); initPeer(); }, 2000);
+            }
+        });
+
+        peer.on('connection', (conn) => {
+            if (isHost) handleNewConnection(conn);
+        });
+    }
+
+    function tryConnectToHost() {
+        const conn = peer.connect('host', { reliable: true });
+        conn.on('open', () => {
+            isHost = false;
+            hostConnection = conn;
+            isConnected = true;
+            statusText.textContent = '🔗 متصل به هاست';
+            console.log('متصل به هاست شدیم');
+
+            conn.on('data', (data) => {
+                if (data.type === 'state') {
+                    players = data.players;
+                    if (!players[myPeerId]) {
+                        players[myPeerId] = { x: myX, y: myY, color: myColor };
+                    }
+                }
+            });
+
+            conn.on('close', () => {
+                console.log('اتصال به هاست قطع شد');
+                statusText.textContent = '❌ هاست قطع شد، تبدیل به هاست جدید...';
+                becomeHost();
+            });
+
+            sendMyPosition();
+        });
+
+        conn.on('error', (err) => {
+            console.log('اتصال به هاست ممکن نیست، تبدیل به هاست می‌شویم:', err);
+            becomeHost();
+        });
+    }
+
+    function becomeHost() {
+        if (isHost) return;
+        if (peer) peer.destroy();
+
+        peer = new Peer('host', {
+            config: { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }] }
+        });
+
+        peer.on('open', (id) => {
+            isHost = true;
+            isConnected = true;
+            myPeerId = id;
+            statusText.textContent = '👑 هاست (سرور)';
+            console.log('ما هاست شدیم با ID:', id);
+            players = {};
+            players[myPeerId] = { x: myX, y: myY, color: myColor };
+        });
+
+        peer.on('error', (err) => {
+            if (err.type === 'unavailable-id') {
+                statusText.textContent = '⚠️ هاست دیگری وجود دارد، وصل می‌شویم...';
+                peer.destroy();
+                setTimeout(() => initPeer(), 1000);
+            }
+        });
+
+        peer.on('connection', (conn) => {
+            if (isHost) handleNewConnection(conn);
+        });
+    }
+
+    function handleNewConnection(conn) {
+        const peerId = conn.peer;
+        console.log('کلاینت جدید متصل شد:', peerId);
+        connections.push(conn);
+
+        conn.on('open', () => {
+            if (!players[peerId]) {
+                players[peerId] = { x: W/2, y: H/2, color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0') };
+            }
+            sendStateToClient(conn);
+        });
+
+        conn.on('data', (data) => {
+            if (data.type === 'position') {
+                if (players[peerId]) {
+                    players[peerId].x = data.x;
+                    players[peerId].y = data.y;
+                    players[peerId].color = data.color || players[peerId].color;
+                } else {
+                    players[peerId] = { x: data.x, y: data.y, color: data.color || '#ff5722' };
+                }
+                broadcastState();
+            }
+        });
+
+        conn.on('close', () => {
+            console.log('کلاینت قطع شد:', peerId);
+            connections = connections.filter(c => c.peer !== peerId);
+            delete players[peerId];
+            broadcastState();
+        });
+
+        if (!players[peerId]) {
+            players[peerId] = { x: W/2, y: H/2, color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0') };
+        }
+        broadcastState();
+    }
+
+    function sendStateToClient(conn) {
+        conn.send({ type: 'state', players: players });
+    }
+
+    function broadcastState() {
+        if (!isHost) return;
+        for (let conn of connections) {
+            if (conn.open) {
+                conn.send({ type: 'state', players: players });
+            }
+        }
+    }
+
+    function sendMyPosition() {
+        if (hostConnection && hostConnection.open) {
+            hostConnection.send({
+                type: 'position',
+                x: myX,
+                y: myY,
+                color: myColor
+            });
+        }
+    }
+
+    // ============================================================
+    //  حلقه بازی
+    // ============================================================
+    function updatePosition() {
+        let dx = 0, dy = 0;
+        if (isDragging) {
+            dx = joyX * SPEED;
+            dy = joyY * SPEED;
+        } else {
+            if (keys.ArrowLeft || keys.a) dx = -SPEED;
+            if (keys.ArrowRight || keys.d) dx = SPEED;
+            if (keys.ArrowUp || keys.w) dy = -SPEED;
+            if (keys.ArrowDown || keys.s) dy = SPEED;
+        }
+
+        myX += dx;
+        myY += dy;
+        myX = Math.max(PADDING + MARGIN, Math.min(W - PADDING - MARGIN, myX));
+        myY = Math.max(PADDING + MARGIN, Math.min(H - PADDING - MARGIN, myY));
+
+        if (isHost) {
+            if (players[myPeerId]) {
+                players[myPeerId].x = myX;
+                players[myPeerId].y = myY;
+                players[myPeerId].color = myColor;
+            } else {
+                players[myPeerId] = { x: myX, y: myY, color: myColor };
+            }
+            broadcastState();
+        } else {
+            sendMyPosition();
+        }
+    }
+
+    function gameLoop() {
+        updatePosition();
+        drawScene();
+        requestAnimationFrame(gameLoop);
+    }
+
+    // ============================================================
+    //  رویدادهای جوی‌استیک و کیبورد
+    // ============================================================
+    function handlePointerStart(e) {
+        e.preventDefault();
+        isDragging = true;
+        joystickZone.classList.add('active');
+        updateJoystickPosition(e);
+    }
+    function handlePointerMove(e) {
+        e.preventDefault();
+        if (isDragging) updateJoystickPosition(e);
+    }
+    function handlePointerEnd(e) {
+        e.preventDefault();
+        isDragging = false;
+        joystickZone.classList.remove('active');
+        joystickThumb.style.transform = 'translate(-50%, -50%)';
+        joyX = 0; joyY = 0;
+    }
+    function updateJoystickPosition(e) {
+        const rect = joystickZone.getBoundingClientRect();
+        const centerX = rect.left + rect.width/2;
+        const centerY = rect.top + rect.height/2;
+        const radius = rect.width/2;
+
+        let clientX, clientY;
+        if (e.touches) {
+            clientX = e.touches[0].clientX;
+            clientY = e.touches[0].clientY;
+        } else {
+            clientX = e.clientX;
+            clientY = e.clientY;
+        }
+
+        let deltaX = clientX - centerX;
+        let deltaY = clientY - centerY;
+        const distance = Math.sqrt(deltaX*deltaX + deltaY*deltaY);
+        const maxDist = radius - 15;
+
+        let clampedX = deltaX, clampedY = deltaY;
+        if (distance > maxDist) {
+            clampedX = (deltaX/distance) * maxDist;
+            clampedY = (deltaY/distance) * maxDist;
+        }
+        joystickThumb.style.transform = `translate(calc(-50% + ${clampedX}px), calc(-50% + ${clampedY}px))`;
+        joyX = clampedX / maxDist;
+        joyY = clampedY / maxDist;
+    }
+
+    joystickZone.addEventListener('pointerdown', handlePointerStart);
+    document.addEventListener('pointermove', handlePointerMove);
+    document.addEventListener('pointerup', handlePointerEnd);
+    document.addEventListener('pointercancel', handlePointerEnd);
+    joystickZone.addEventListener('touchstart', (e) => { e.preventDefault(); handlePointerStart(e); }, { passive: false });
+    document.addEventListener('touchmove', (e) => { if (isDragging) { e.preventDefault(); handlePointerMove(e); } }, { passive: false });
+    document.addEventListener('touchend', handlePointerEnd, { passive: false });
+    document.addEventListener('touchcancel', handlePointerEnd, { passive: false });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key in keys) { keys[e.key] = true; e.preventDefault(); }
+    });
+    document.addEventListener('keyup', (e) => {
+        if (e.key in keys) { keys[e.key] = false; e.preventDefault(); }
+    });
+
+    // ============================================================
+    //  راه‌اندازی نهایی
+    // ============================================================
+    initPeer();
+    gameLoop();
+
+    setInterval(() => {
+        if (!isHost && hostConnection && hostConnection.open) {
+            sendMyPosition();
+        }
+    }, 50);
+
+    console.log('🎮 بازی آنلاین P2P راه‌اندازی شد. اولین کاربر هاست می‌شود.');
+</script>
+</body>
+</html>
