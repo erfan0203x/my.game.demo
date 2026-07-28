@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>🎮 استیکمن آنلاین</title>
+    <title>🎮 استیکمن آنلاین (WebSocket)</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
         body {
@@ -124,21 +124,14 @@
 </div>
 
 <script>
-    // =============================================================
-    //  🚀 WebSocket عمومی (بدون نیاز به تنظیمات)
-    //  از سرویس رایگان PieSocket استفاده می‌کند
-    // =============================================================
-    const ROOM = 'stickman-game';  // اسم اتاق - همه باید یکسان باشد
+    // ============================================================
+    //  🚀 WebSocket عمومی (PieSocket)
+    //  اگر سروری وجود نداشته باشد، خودش هاست می‌شود
+    // ============================================================
+    const ROOM = 'stickman-game';
     const WS_URL = 'wss://demo.piesocket.com/v3/1?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self';
 
-    let socket = null;
-    let myId = 'p' + Math.random().toString(36).substr(2, 5);
-    let players = {};
-    let isConnected = false;
-
-    // =============================================================
-    //  متغیرهای بازی
-    // =============================================================
+    // ---- متغیرهای اصلی ----
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     const posStatus = document.getElementById('posStatus');
@@ -151,6 +144,13 @@
 
     let myX = W/2, myY = H/2;
     let myColor = '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0');
+    let myId = 'p' + Math.random().toString(36).substr(2, 6);
+
+    let players = {};
+    let isHost = false;
+    let isConnected = false;
+    let socket = null;
+    let reconnectTimer = null;
 
     // ---- جوی‌استیک ----
     const joystickZone = document.getElementById('joystickZone');
@@ -164,10 +164,10 @@
         w: false, a: false, s: false, d: false
     };
 
-    // =============================================================
+    // ============================================================
     //  توابع رسم
-    // =============================================================
-    function drawStickman(cx, cy, color = '#1a2639', isMe = false) {
+    // ============================================================
+    function drawStickman(cx, cy, color = '#1a2639', isMe = false, host = false) {
         ctx.save();
         ctx.strokeStyle = color;
         ctx.lineWidth = 3;
@@ -221,6 +221,12 @@
             ctx.textAlign = 'center';
             ctx.fillText('⭐', cx, cy - 45);
         }
+        if (host) {
+            ctx.fillStyle = '#ffd700';
+            ctx.font = '22px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('👑', cx + 30, cy - 45);
+        }
 
         ctx.restore();
     }
@@ -242,28 +248,30 @@
             if (id === myId) continue;
             const p = players[id];
             if (p) {
-                drawStickman(p.x, p.y, p.color, false);
+                drawStickman(p.x, p.y, p.color, false, p.isHost);
             }
         }
-        drawStickman(myX, myY, myColor, true);
+        drawStickman(myX, myY, myColor, true, isHost);
 
         const count = Object.keys(players).length;
         posStatus.textContent = `📍 (${Math.round(myX)}, ${Math.round(myY)})  |  بازیکنان: ${count}`;
     }
 
-    // =============================================================
-    //  WebSocket
-    // =============================================================
+    // ============================================================
+    //  WebSocket با هاست خودکار
+    // ============================================================
     function connectWS() {
+        if (socket && socket.readyState === WebSocket.OPEN) return;
+
         statusText.textContent = '🔄 اتصال به سرور...';
         socket = new WebSocket(WS_URL);
 
         socket.onopen = () => {
             isConnected = true;
             statusText.textContent = '✅ متصل به سرور';
-            console.log('✅ WebSocket وصل شد');
+            console.log('✅ WebSocket متصل شد');
 
-            // عضویت در اتاق
+            // به اتاق بپیوند
             socket.send(JSON.stringify({
                 action: 'join',
                 room: ROOM,
@@ -271,16 +279,24 @@
                 data: {
                     x: myX,
                     y: myY,
-                    color: myColor
+                    color: myColor,
+                    isHost: false
                 }
             }));
 
-            // هر ۵ ثانیه یکبار ping بفرستیم تا اتصال قطع نشود
+            // بعد از 2 ثانیه، اگر کسی در اتاق نبود، هاست می‌شویم
+            setTimeout(() => {
+                if (!isHost && Object.keys(players).length === 0) {
+                    becomeHost();
+                }
+            }, 3000);
+
+            // Ping برای جلوگیری از قطع شدن
             setInterval(() => {
                 if (socket && socket.readyState === WebSocket.OPEN) {
                     socket.send(JSON.stringify({ action: 'ping' }));
                 }
-            }, 5000);
+            }, 8000);
         };
 
         socket.onmessage = (e) => {
@@ -296,7 +312,14 @@
             isConnected = false;
             statusText.textContent = '❌ قطع شد، تلاش مجدد...';
             console.log('❌ WebSocket قطع شد');
-            setTimeout(() => connectWS(), 2000);
+
+            // تلاش مجدد برای اتصال
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(() => {
+                if (!isConnected) {
+                    connectWS();
+                }
+            }, 3000);
         };
 
         socket.onerror = (err) => {
@@ -306,16 +329,43 @@
 
     function handleMessage(msg) {
         if (msg.action === 'state') {
-            // دریافت لیست کامل بازیکنان
+            // دریافت لیست کامل بازیکنان از سرور
             const data = msg.data || {};
             for (let id in data) {
                 if (id !== myId) {
                     players[id] = data[id];
                 }
             }
+            // اگر خودمان در لیست نبودیم، اضافه می‌کنیم
             if (!players[myId]) {
-                players[myId] = { x: myX, y: myY, color: myColor };
+                players[myId] = { x: myX, y: myY, color: myColor, isHost: isHost };
+                sendMyPos();
             }
+
+            // بررسی اینکه آیا هاست وجود دارد
+            let hostExists = false;
+            for (let id in players) {
+                if (players[id].isHost) {
+                    hostExists = true;
+                    break;
+                }
+            }
+            // اگر هاست وجود ندارد و ما هاست نیستیم، هاست می‌شویم
+            if (!hostExists && !isHost && Object.keys(players).length > 0) {
+                becomeHost();
+            }
+            // اگر ما هاست هستیم و کسی دیگر هاست شده، هاست بودن را لغو می‌کنیم
+            if (isHost) {
+                for (let id in players) {
+                    if (id !== myId && players[id].isHost) {
+                        isHost = false;
+                        players[myId].isHost = false;
+                        statusText.textContent = '🔗 متصل به هاست';
+                        break;
+                    }
+                }
+            }
+
         } else if (msg.action === 'update') {
             // به‌روزرسانی موقعیت یک بازیکن
             const id = msg.id;
@@ -324,17 +374,67 @@
                     players[id].x = msg.data.x;
                     players[id].y = msg.data.y;
                     players[id].color = msg.data.color || players[id].color;
+                    players[id].isHost = msg.data.isHost || players[id].isHost || false;
                 } else {
-                    players[id] = { x: msg.data.x, y: msg.data.y, color: msg.data.color || '#ff5722' };
+                    players[id] = {
+                        x: msg.data.x,
+                        y: msg.data.y,
+                        color: msg.data.color || '#ff5722',
+                        isHost: msg.data.isHost || false
+                    };
                 }
             }
+
         } else if (msg.action === 'leave') {
             const id = msg.id;
             if (id && id !== myId) {
                 delete players[id];
                 console.log('❌ بازیکن خارج شد:', id);
+
+                // اگر هاست رفت، ما هاست می‌شویم
+                if (isHost) {
+                    // اگر هاست بودیم که هیچ
+                } else {
+                    // بررسی کنیم که آیا هاست رفته است
+                    let hostExists = false;
+                    for (let id2 in players) {
+                        if (players[id2].isHost) {
+                            hostExists = true;
+                            break;
+                        }
+                    }
+                    if (!hostExists && Object.keys(players).length > 0) {
+                        becomeHost();
+                    }
+                }
+            }
+
+        } else if (msg.action === 'host_elected') {
+            // اگر سرور به ما گفت هاست شو
+            if (msg.id === myId) {
+                becomeHost();
             }
         }
+    }
+
+    function becomeHost() {
+        if (isHost) return;
+        if (!isConnected) return;
+
+        isHost = true;
+        statusText.textContent = '👑 هاست (سرور)';
+        console.log('✅ ما هاست شدیم');
+
+        // خودمان را به عنوان هاست معرفی می‌کنیم
+        players[myId] = { x: myX, y: myY, color: myColor, isHost: true };
+        sendMyPos();
+
+        // به همه اعلام کنیم که هاست جدیدی هست
+        socket.send(JSON.stringify({
+            action: 'host_elected',
+            room: ROOM,
+            id: myId
+        }));
     }
 
     function sendMyPos() {
@@ -346,14 +446,15 @@
             data: {
                 x: myX,
                 y: myY,
-                color: myColor
+                color: myColor,
+                isHost: isHost
             }
         }));
     }
 
-    // =============================================================
+    // ============================================================
     //  حلقه بازی
-    // =============================================================
+    // ============================================================
     function updatePosition() {
         let dx = 0, dy = 0;
         if (isDragging) {
@@ -371,7 +472,8 @@
         myX = Math.max(PADDING + MARGIN, Math.min(W - PADDING - MARGIN, myX));
         myY = Math.max(PADDING + MARGIN, Math.min(H - PADDING - MARGIN, myY));
 
-        players[myId] = { x: myX, y: myY, color: myColor };
+        // به‌روزرسانی خودمان
+        players[myId] = { x: myX, y: myY, color: myColor, isHost: isHost };
         sendMyPos();
     }
 
@@ -381,9 +483,9 @@
         requestAnimationFrame(gameLoop);
     }
 
-    // =============================================================
+    // ============================================================
     //  رویدادهای جوی‌استیک و کیبورد
-    // =============================================================
+    // ============================================================
     function handlePointerStart(e) {
         e.preventDefault();
         isDragging = true;
@@ -447,9 +549,9 @@
         if (e.key in keys) { keys[e.key] = false; e.preventDefault(); }
     });
 
-    // =============================================================
+    // ============================================================
     //  راه‌اندازی نهایی
-    // =============================================================
+    // ============================================================
     connectWS();
     gameLoop();
 
@@ -460,7 +562,7 @@
         }
     }, 50);
 
-    console.log('🎮 بازی با WebSocket عمومی راه‌اندازی شد.');
+    console.log('🎮 بازی با WebSocket و هاست خودکار راه‌اندازی شد.');
 </script>
 </body>
 </html>
