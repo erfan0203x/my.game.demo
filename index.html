@@ -133,20 +133,20 @@
     const SPEED = 4.5;
     const MARGIN = 25;
 
-    // موقعیت خود بازیکن (همیشه در مرکز شروع می‌شود)
     let myX = W/2, myY = H/2;
     let myColor = '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0');
 
-    // ---- متغیرهای شبکه ----
+    // ---- شبکه ----
     let peer = null;
     let isHost = false;
     let connections = [];
     let myPeerId = null;
     let hostConnection = null;
-    let players = {};          // بازیکنان دیگر (از هاست دریافت می‌شود)
+    let players = {};
     let isConnected = false;
+    let reconnectAttempts = 0;
 
-    // ---- جوی‌استیک لمسی ----
+    // ---- جوی‌استیک ----
     const joystickZone = document.getElementById('joystickZone');
     const joystickThumb = document.getElementById('joystickThumb');
     let isDragging = false;
@@ -159,7 +159,7 @@
     };
 
     // ============================================================
-    //  توابع رسم
+    //  توابع رسم (بدون تغییر)
     // ============================================================
     function drawStickman(cx, cy, color = '#1a2639', showCrown = false) {
         ctx.save();
@@ -168,14 +168,12 @@
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
 
-        // سر
         ctx.beginPath();
         ctx.arc(cx, cy - 22, 16, 0, Math.PI * 2);
         ctx.fillStyle = '#ffe0b0';
         ctx.fill();
         ctx.stroke();
 
-        // چشم
         ctx.fillStyle = '#1a2639';
         ctx.beginPath();
         ctx.arc(cx - 6, cy - 26, 3, 0, Math.PI * 2);
@@ -184,19 +182,16 @@
         ctx.arc(cx + 6, cy - 26, 3, 0, Math.PI * 2);
         ctx.fill();
 
-        // بدن
         ctx.beginPath();
         ctx.moveTo(cx, cy - 6);
         ctx.lineTo(cx, cy + 18);
         ctx.stroke();
 
-        // دست‌ها
         ctx.beginPath();
         ctx.moveTo(cx - 18, cy + 2);
         ctx.lineTo(cx + 18, cy + 2);
         ctx.stroke();
 
-        // پاها
         ctx.beginPath();
         ctx.moveTo(cx, cy + 18);
         ctx.lineTo(cx - 14, cy + 40);
@@ -206,7 +201,6 @@
         ctx.lineTo(cx + 14, cy + 40);
         ctx.stroke();
 
-        // کفش
         ctx.fillStyle = '#d32f2f';
         ctx.beginPath();
         ctx.ellipse(cx - 14, cy + 41, 6, 3, 0, 0, Math.PI * 2);
@@ -215,7 +209,6 @@
         ctx.ellipse(cx + 14, cy + 41, 6, 3, 0, 0, Math.PI * 2);
         ctx.fill();
 
-        // اگر هاست باشد، تاج بکش
         if (showCrown) {
             ctx.fillStyle = '#ffd700';
             ctx.font = '20px sans-serif';
@@ -229,7 +222,6 @@
     function drawScene() {
         ctx.clearRect(0, 0, W, H);
 
-        // فضای کوچک (کادر آبی)
         ctx.save();
         ctx.strokeStyle = '#2979ff';
         ctx.lineWidth = 3;
@@ -240,104 +232,194 @@
         ctx.fillRect(PADDING, PADDING, W - (PADDING*2), H - (PADDING*2));
         ctx.restore();
 
-        // 1. رسم سایر بازیکنان (از لیست players)
         for (let id in players) {
             if (id === myPeerId) continue;
             const p = players[id];
             drawStickman(p.x, p.y, p.color, false);
         }
 
-        // 2. رسم خود بازیکن (همیشه، حتی اگر در players نباشد)
         drawStickman(myX, myY, myColor, isHost);
 
-        // به‌روزرسانی متن وضعیت
         const playerCount = Object.keys(players).length + 1;
         posStatus.textContent = `📍 (${Math.round(myX)}, ${Math.round(myY)})  |  بازیکنان: ${playerCount}`;
     }
 
     // ============================================================
-    //  منطق شبکه (PeerJS)
+    //  منطق شبکه (بهبود یافته)
     // ============================================================
     function initPeer() {
+        if (peer) {
+            peer.destroy();
+            peer = null;
+        }
+
         peer = new Peer(undefined, {
-            config: { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }] }
+            config: {
+                'iceServers': [
+                    { 'urls': 'stun:stun.l.google.com:19302' },
+                    { 'urls': 'stun:stun1.l.google.com:19302' },
+                    { 'urls': 'stun:stun2.l.google.com:19302' }
+                ]
+            }
         });
 
         peer.on('open', (id) => {
             myPeerId = id;
             statusText.textContent = `🆔 ${id}`;
-            console.log('Peer ID:', id);
-            tryConnectToHost();
+            console.log('🔑 Peer ID:', id);
+            
+            // اگر قبلاً به عنوان هاست شناخته شده بودیم، خودمان را به لیست اضافه می‌کنیم
+            if (isHost) {
+                players[myPeerId] = { x: myX, y: myY, color: myColor };
+                broadcastState();
+            } else {
+                tryConnectToHost();
+            }
         });
 
         peer.on('error', (err) => {
-            console.error('Peer error:', err);
+            console.error('❌ Peer error:', err);
             if (err.type === 'unavailable-id' || err.message.includes('ID taken')) {
-                statusText.textContent = '🔄 تلاش مجدد...';
-                setTimeout(() => { peer.destroy(); initPeer(); }, 2000);
+                statusText.textContent = '🔄 هاست موجود است، در حال اتصال...';
+                // اگر هاست از قبل وجود دارد، به عنوان کلاینت متصل می‌شویم
+                if (!isHost) {
+                    setTimeout(() => tryConnectToHost(), 1000);
+                }
+            } else if (err.type === 'peer-unavailable') {
+                // هاست پیدا نشد → خودمان هاست می‌شویم
+                becomeHost();
+            } else {
+                // خطای دیگر → تلاش مجدد
+                setTimeout(() => {
+                    if (!isConnected) initPeer();
+                }, 3000);
             }
         });
 
         peer.on('connection', (conn) => {
-            if (isHost) handleNewConnection(conn);
+            if (isHost) {
+                handleNewConnection(conn);
+            } else {
+                // اگر کلاینت هستیم و کسی به ما متصل شد (معمولاً نباید اتفاق بیفتد)
+                console.log('🔗 اتصال ورودی غیرمنتظره از:', conn.peer);
+            }
         });
+
+        // اگر بعد از 5 ثانیه هنوز به هاست وصل نشدیم، خودمان هاست می‌شویم
+        setTimeout(() => {
+            if (!isHost && !hostConnection && !isConnected) {
+                console.log('⏰ زمان اتصال به هاست تمام شد، تبدیل به هاست...');
+                becomeHost();
+            }
+        }, 5000);
     }
 
     function tryConnectToHost() {
+        if (isHost) return;
+        if (hostConnection && hostConnection.open) return;
+
+        console.log('🔗 تلاش برای اتصال به هاست (ID: host)...');
         const conn = peer.connect('host', { reliable: true });
+
+        // تنظیم تایم‌اوت برای اتصال
+        const timeout = setTimeout(() => {
+            if (!conn.open) {
+                console.log('⏰ تایم‌اوت اتصال به هاست');
+                conn.close();
+                // اگر هاست پاسخ نداد، خودمان هاست می‌شویم
+                if (!isHost && !isConnected) {
+                    becomeHost();
+                }
+            }
+        }, 5000);
+
         conn.on('open', () => {
+            clearTimeout(timeout);
             isHost = false;
             hostConnection = conn;
             isConnected = true;
             statusText.textContent = '🔗 متصل به هاست';
-            console.log('متصل به هاست شدیم');
+            console.log('✅ متصل به هاست شدیم');
 
             conn.on('data', (data) => {
                 if (data.type === 'state') {
                     players = data.players;
+                    // خودمان را به لیست اضافه می‌کنیم (اگر نبود)
                     if (!players[myPeerId]) {
                         players[myPeerId] = { x: myX, y: myY, color: myColor };
+                        // موقعیت خود را به هاست می‌فرستیم
+                        sendMyPosition();
                     }
                 }
             });
 
             conn.on('close', () => {
-                console.log('اتصال به هاست قطع شد');
+                console.log('❌ اتصال به هاست قطع شد');
+                hostConnection = null;
+                isConnected = false;
                 statusText.textContent = '❌ هاست قطع شد، تبدیل به هاست جدید...';
+                // تبدیل به هاست جدید
                 becomeHost();
             });
 
+            // ارسال موقعیت اولیه
             sendMyPosition();
         });
 
         conn.on('error', (err) => {
-            console.log('اتصال به هاست ممکن نیست، تبدیل به هاست می‌شویم:', err);
-            becomeHost();
+            clearTimeout(timeout);
+            console.log('❌ خطا در اتصال به هاست:', err);
+            // اگر هاست پاسخ نداد، خودمان هاست می‌شویم
+            if (!isHost && !isConnected) {
+                becomeHost();
+            }
         });
     }
 
     function becomeHost() {
         if (isHost) return;
-        if (peer) peer.destroy();
+        console.log('👑 تبدیل به هاست...');
+        isHost = true;
+        isConnected = true;
+        
+        // نابود کردن peer قبلی و ایجاد peer جدید با ID 'host'
+        if (peer) {
+            peer.destroy();
+            peer = null;
+        }
 
         peer = new Peer('host', {
-            config: { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }] }
+            config: {
+                'iceServers': [
+                    { 'urls': 'stun:stun.l.google.com:19302' },
+                    { 'urls': 'stun:stun1.l.google.com:19302' },
+                    { 'urls': 'stun:stun2.l.google.com:19302' }
+                ]
+            }
         });
 
         peer.on('open', (id) => {
+            myPeerId = id;
             isHost = true;
             isConnected = true;
-            myPeerId = id;
             statusText.textContent = '👑 هاست (سرور)';
-            console.log('ما هاست شدیم با ID:', id);
+            console.log('✅ ما هاست شدیم با ID:', id);
+            
+            // خودمان را به لیست بازیکنان اضافه می‌کنیم
             players = {};
             players[myPeerId] = { x: myX, y: myY, color: myColor };
+            broadcastState();
         });
 
         peer.on('error', (err) => {
+            console.error('❌ خطای هاست:', err);
             if (err.type === 'unavailable-id') {
+                // شخص دیگری هاست شده، به عنوان کلاینت متصل می‌شویم
                 statusText.textContent = '⚠️ هاست دیگری وجود دارد، وصل می‌شویم...';
+                isHost = false;
+                isConnected = false;
                 peer.destroy();
+                peer = null;
                 setTimeout(() => initPeer(), 1000);
             }
         });
@@ -349,14 +431,20 @@
 
     function handleNewConnection(conn) {
         const peerId = conn.peer;
-        console.log('کلاینت جدید متصل شد:', peerId);
+        console.log('🔗 کلاینت جدید متصل شد:', peerId);
         connections.push(conn);
 
         conn.on('open', () => {
+            // کلاینت را به لیست بازیکنان اضافه می‌کنیم
             if (!players[peerId]) {
-                players[peerId] = { x: W/2, y: H/2, color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0') };
+                players[peerId] = { 
+                    x: W/2, 
+                    y: H/2, 
+                    color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0') 
+                };
             }
             sendStateToClient(conn);
+            broadcastState();
         });
 
         conn.on('data', (data) => {
@@ -373,20 +461,17 @@
         });
 
         conn.on('close', () => {
-            console.log('کلاینت قطع شد:', peerId);
+            console.log('❌ کلاینت قطع شد:', peerId);
             connections = connections.filter(c => c.peer !== peerId);
             delete players[peerId];
             broadcastState();
         });
-
-        if (!players[peerId]) {
-            players[peerId] = { x: W/2, y: H/2, color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0') };
-        }
-        broadcastState();
     }
 
     function sendStateToClient(conn) {
-        conn.send({ type: 'state', players: players });
+        if (conn.open) {
+            conn.send({ type: 'state', players: players });
+        }
     }
 
     function broadcastState() {
@@ -450,7 +535,7 @@
     }
 
     // ============================================================
-    //  رویدادهای جوی‌استیک و کیبورد
+    //  رویدادها
     // ============================================================
     function handlePointerStart(e) {
         e.preventDefault();
@@ -516,18 +601,19 @@
     });
 
     // ============================================================
-    //  راه‌اندازی نهایی
+    //  راه‌اندازی
     // ============================================================
     initPeer();
     gameLoop();
 
+    // ارسال موقعیت به‌صورت دوره‌ای برای کلاینت‌ها
     setInterval(() => {
         if (!isHost && hostConnection && hostConnection.open) {
             sendMyPosition();
         }
     }, 50);
 
-    console.log('🎮 بازی آنلاین P2P راه‌اندازی شد. اولین کاربر هاست می‌شود.');
+    console.log('🎮 بازی آنلاین P2P راه‌اندازی شد.');
 </script>
 </body>
 </html>
