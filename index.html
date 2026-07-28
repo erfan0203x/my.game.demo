@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>🎮 استیکمن آنلاین</title>
-    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
         body {
@@ -125,7 +124,21 @@
 </div>
 
 <script>
-    // ----- متغیرهای پایه -----
+    // ============================================================
+    //  🚀 اتصال به WebSocket عمومی (PieSocket)
+    //  بدون نیاز به ثبت‌نام یا تنظیمات اضافی
+    // ============================================================
+    const ROOM_NAME = 'stickman-game';  // نام اتاق (همه باید یکسان باشد)
+    const WS_URL = 'wss://demo.piesocket.com/v3/1?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self';
+
+    let socket = null;
+    let myId = 'player_' + Math.random().toString(36).substr(2, 6);
+    let players = {};
+    let isConnected = false;
+
+    // ============================================================
+    //  متغیرهای بازی
+    // ============================================================
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     const posStatus = document.getElementById('posStatus');
@@ -138,14 +151,6 @@
 
     let myX = W/2, myY = H/2;
     let myColor = '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0');
-
-    // ---- شبکه ----
-    let peer = null;
-    let connections = [];
-    let myPeerId = null;
-    let players = {};
-    let isConnected = false;
-    let roomId = 'stickman-room'; // اسم اتاق مشترک
 
     // ---- جوی‌استیک ----
     const joystickZone = document.getElementById('joystickZone');
@@ -233,11 +238,10 @@
         ctx.fillRect(PADDING, PADDING, W - (PADDING*2), H - (PADDING*2));
         ctx.restore();
 
-        // رسم همه بازیکنان
         for (let id in players) {
             const p = players[id];
             if (p && typeof p.x === 'number') {
-                const isMe = (id === myPeerId);
+                const isMe = (id === myId);
                 drawStickman(p.x, p.y, p.color, isMe);
             }
         }
@@ -247,204 +251,108 @@
     }
 
     // ============================================================
-    //  منطق شبکه - اتاق مشترک (مخصوص موبایل و کامپیوتر)
+    //  منطق WebSocket
     // ============================================================
-    function initPeer() {
-        if (peer) {
-            peer.destroy();
-            peer = null;
-        }
+    function connectWebSocket() {
+        statusText.textContent = '🔄 اتصال به سرور...';
+        socket = new WebSocket(WS_URL);
 
-        statusText.textContent = '🔄 در حال راه‌اندازی...';
+        socket.onopen = () => {
+            isConnected = true;
+            statusText.textContent = '✅ متصل به سرور';
+            console.log('✅ WebSocket متصل شد');
 
-        peer = new Peer(undefined, {
-            config: {
-                'iceServers': [
-                    { 'urls': 'stun:stun.l.google.com:19302' },
-                    { 'urls': 'stun:stun1.l.google.com:19302' },
-                    { 'urls': 'stun:stun2.l.google.com:19302' }
-                ]
+            // عضویت در اتاق
+            socket.send(JSON.stringify({
+                action: 'join',
+                room: ROOM_NAME,
+                id: myId,
+                data: {
+                    x: myX,
+                    y: myY,
+                    color: myColor
+                }
+            }));
+
+            // هر ۲ ثانیه یک بار، برای جلوگیری از قطع شدن، ping بفرست
+            setInterval(() => {
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ action: 'ping' }));
+                }
+            }, 10000);
+        };
+
+        socket.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                handleMessage(msg);
+            } catch (e) {
+                console.log('خطا در پردازش پیام:', e);
             }
-        });
+        };
 
-        peer.on('open', (id) => {
-            myPeerId = id;
-            statusText.textContent = `🆔 ${id}`;
-            console.log('🔑 Peer ID:', id);
-            
-            //加入 اتاق
-            joinRoom();
-        });
-
-        peer.on('error', (err) => {
-            console.error('❌ Peer error:', err);
-            statusText.textContent = '⚠️ خطا، تلاش مجدد...';
+        socket.onclose = () => {
+            isConnected = false;
+            statusText.textContent = '❌ قطع شد، تلاش مجدد...';
+            console.log('❌ WebSocket قطع شد، تلاش مجدد...');
             setTimeout(() => {
-                if (!isConnected) initPeer();
+                connectWebSocket();
             }, 3000);
-        });
+        };
 
-        peer.on('connection', (conn) => {
-            handleNewConnection(conn);
-        });
+        socket.onerror = (err) => {
+            console.error('❌ خطای WebSocket:', err);
+        };
     }
 
-    function joinRoom() {
-        // به اتاق بپیوند: با همه کسانی که در اتاق هستند ارتباط برقرار کن
-        // برای سادگی، به یک ID ثابت (roomId) متصل می‌شویم
-        const conn = peer.connect(roomId, { reliable: true });
-        
-        conn.on('open', () => {
-            console.log('✅ به اتاق وصل شدیم');
-            isConnected = true;
-            statusText.textContent = '🎮 متصل به اتاق';
-            connections.push(conn);
-            
-            // خودمان را به لیست بازیکنان اضافه می‌کنیم
-            players[myPeerId] = { x: myX, y: myY, color: myColor };
-            broadcastState();
-
-            conn.on('data', (data) => {
-                handleData(data, conn.peer);
-            });
-
-            conn.on('close', () => {
-                console.log('❌ اتصال قطع شد');
-                connections = connections.filter(c => c.peer !== conn.peer);
-                delete players[conn.peer];
-                isConnected = false;
-                statusText.textContent = '❌ قطع شد، تلاش مجدد...';
-                setTimeout(() => joinRoom(), 2000);
-            });
-        });
-
-        conn.on('error', (err) => {
-            console.log('❌ خطا در اتصال به اتاق:', err);
-            // اگر نتوانست به اتاق وصل شود، خودش اتاق را ایجاد می‌کند
-            if (err.type === 'peer-unavailable') {
-                createRoom();
-            } else {
-                setTimeout(() => joinRoom(), 2000);
-            }
-        });
-    }
-
-    function createRoom() {
-        // اگر کسی در اتاق نبود، خودمان با ID roomId ثبت می‌شویم
-        if (peer) {
-            peer.destroy();
-            peer = null;
-        }
-
-        statusText.textContent = '🔄 ایجاد اتاق...';
-
-        peer = new Peer(roomId, {
-            config: {
-                'iceServers': [
-                    { 'urls': 'stun:stun.l.google.com:19302' },
-                    { 'urls': 'stun:stun1.l.google.com:19302' },
-                    { 'urls': 'stun:stun2.l.google.com:19302' }
-                ]
-            }
-        });
-
-        peer.on('open', (id) => {
-            myPeerId = id;
-            isConnected = true;
-            statusText.textContent = '👑 میزبان اتاق';
-            console.log('✅ اتاق ایجاد شد با ID:', id);
-            players[myPeerId] = { x: myX, y: myY, color: myColor };
-            broadcastState();
-        });
-
-        peer.on('error', (err) => {
-            console.error('❌ خطا در ایجاد اتاق:', err);
-            if (err.type === 'unavailable-id') {
-                // کسی دیگر اتاق را ایجاد کرده، به او وصل شو
-                statusText.textContent = '🔄 وصل شدن به اتاق موجود...';
-                peer.destroy();
-                peer = null;
-                setTimeout(() => initPeer(), 1000);
-            }
-        });
-
-        peer.on('connection', (conn) => {
-            handleNewConnection(conn);
-        });
-    }
-
-    function handleNewConnection(conn) {
-        const peerId = conn.peer;
-        console.log('🔗 اتصال جدید از:', peerId);
-        connections.push(conn);
-
-        conn.on('open', () => {
-            // بازیکن جدید را به لیست اضافه کن
-            if (!players[peerId]) {
-                players[peerId] = {
-                    x: W/2,
-                    y: H/2,
-                    color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0')
-                };
-            }
-            broadcastState();
-        });
-
-        conn.on('data', (data) => {
-            handleData(data, peerId);
-        });
-
-        conn.on('close', () => {
-            console.log('❌ اتصال قطع شد:', peerId);
-            connections = connections.filter(c => c.peer !== peerId);
-            delete players[peerId];
-            broadcastState();
-        });
-    }
-
-    function handleData(data, fromPeerId) {
-        if (data.type === 'state') {
-            // به‌روزرسانی لیست بازیکنان
-            const newPlayers = data.players || {};
-            for (let id in newPlayers) {
-                if (id !== myPeerId) {
-                    players[id] = newPlayers[id];
+    function handleMessage(msg) {
+        if (msg.action === 'state') {
+            // دریافت لیست کامل بازیکنان از سرور
+            const data = msg.data || {};
+            // داده‌ها را به‌روز کن
+            for (let id in data) {
+                if (id !== myId) {
+                    players[id] = data[id];
                 }
             }
-        } else if (data.type === 'position') {
-            // به‌روزرسانی موقعیت یک بازیکن
-            if (players[fromPeerId]) {
-                players[fromPeerId].x = data.x;
-                players[fromPeerId].y = data.y;
-                players[fromPeerId].color = data.color || players[fromPeerId].color;
-            } else {
-                players[fromPeerId] = { x: data.x, y: data.y, color: data.color || '#ff5722' };
+            // خودمان را هم در لیست نگه دار
+            if (!players[myId]) {
+                players[myId] = { x: myX, y: myY, color: myColor };
             }
-        }
-    }
-
-    function broadcastState() {
-        // وضعیت همه بازیکنان را برای همه ارسال کن
-        const state = { type: 'state', players: players };
-        for (let conn of connections) {
-            if (conn.open) {
-                conn.send(state);
+        } else if (msg.action === 'update') {
+            // به‌روزرسانی موقعیت یک بازیکن
+            const id = msg.id;
+            if (id && id !== myId) {
+                if (players[id]) {
+                    players[id].x = msg.data.x;
+                    players[id].y = msg.data.y;
+                    players[id].color = msg.data.color || players[id].color;
+                } else {
+                    players[id] = { x: msg.data.x, y: msg.data.y, color: msg.data.color || '#ff5722' };
+                }
+            }
+        } else if (msg.action === 'leave') {
+            // بازیکنی خارج شد
+            const id = msg.id;
+            if (id && id !== myId) {
+                delete players[id];
+                console.log('❌ بازیکن خارج شد:', id);
             }
         }
     }
 
     function sendMyPosition() {
-        const data = {
-            type: 'position',
-            x: myX,
-            y: myY,
-            color: myColor
-        };
-        for (let conn of connections) {
-            if (conn.open) {
-                conn.send(data);
+        if (!isConnected || !socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({
+            action: 'update',
+            room: ROOM_NAME,
+            id: myId,
+            data: {
+                x: myX,
+                y: myY,
+                color: myColor
             }
-        }
+        }));
     }
 
     // ============================================================
@@ -467,16 +375,10 @@
         myX = Math.max(PADDING + MARGIN, Math.min(W - PADDING - MARGIN, myX));
         myY = Math.max(PADDING + MARGIN, Math.min(H - PADDING - MARGIN, myY));
 
-        // موقعیت خود را به‌روز کن
-        if (players[myPeerId]) {
-            players[myPeerId].x = myX;
-            players[myPeerId].y = myY;
-            players[myPeerId].color = myColor;
-        } else {
-            players[myPeerId] = { x: myX, y: myY, color: myColor };
-        }
+        // به‌روزرسانی خودمان در لیست local
+        players[myId] = { x: myX, y: myY, color: myColor };
 
-        // برای همه بفرست
+        // ارسال به سرور
         sendMyPosition();
     }
 
@@ -555,17 +457,17 @@
     // ============================================================
     //  راه‌اندازی نهایی
     // ============================================================
-    initPeer();
+    connectWebSocket();
     gameLoop();
 
-    // ارسال موقعیت به‌صورت دوره‌ای
+    // ارسال موقعیت هر 50 میلی‌ثانیه
     setInterval(() => {
         if (isConnected) {
             sendMyPosition();
         }
     }, 50);
 
-    console.log('🎮 بازی با اتاق مشترک راه‌اندازی شد.');
+    console.log('🎮 بازی با WebSocket عمومی راه‌اندازی شد.');
 </script>
 </body>
 </html>
