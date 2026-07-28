@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>🎮 استیکمن آنلاین</title>
+    <title>🎮 استیکمن آنلاین (PeerJS)</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
         body {
@@ -124,21 +125,7 @@
 </div>
 
 <script>
-    // ============================================================
-    //  🚀 اتصال به WebSocket عمومی (PieSocket)
-    //  بدون نیاز به ثبت‌نام یا تنظیمات اضافی
-    // ============================================================
-    const ROOM_NAME = 'stickman-game';  // نام اتاق (همه باید یکسان باشد)
-    const WS_URL = 'wss://demo.piesocket.com/v3/1?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self';
-
-    let socket = null;
-    let myId = 'player_' + Math.random().toString(36).substr(2, 6);
-    let players = {};
-    let isConnected = false;
-
-    // ============================================================
-    //  متغیرهای بازی
-    // ============================================================
+    // ----- متغیرهای پایه -----
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     const posStatus = document.getElementById('posStatus');
@@ -151,6 +138,17 @@
 
     let myX = W/2, myY = H/2;
     let myColor = '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0');
+
+    // ---- شبکه ----
+    let peer = null;
+    let isHost = false;
+    let connections = [];
+    let myPeerId = null;
+    let hostConnection = null;
+    let players = {};
+    let isConnected = false;
+    let isConnecting = false;
+    let reconnectTimeout = null;
 
     // ---- جوی‌استیک ----
     const joystickZone = document.getElementById('joystickZone');
@@ -165,9 +163,9 @@
     };
 
     // ============================================================
-    //  توابع رسم
+    //  توابع رسم (بدون تغییر)
     // ============================================================
-    function drawStickman(cx, cy, color = '#1a2639', isMe = false) {
+    function drawStickman(cx, cy, color = '#1a2639', showCrown = false) {
         ctx.save();
         ctx.strokeStyle = color;
         ctx.lineWidth = 3;
@@ -215,11 +213,11 @@
         ctx.ellipse(cx + 14, cy + 41, 6, 3, 0, 0, Math.PI * 2);
         ctx.fill();
 
-        if (isMe) {
+        if (showCrown) {
             ctx.fillStyle = '#ffd700';
-            ctx.font = '18px sans-serif';
+            ctx.font = '20px sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText('⭐', cx, cy - 45);
+            ctx.fillText('👑', cx, cy - 45);
         }
 
         ctx.restore();
@@ -239,120 +237,272 @@
         ctx.restore();
 
         for (let id in players) {
+            if (id === myPeerId) continue;
             const p = players[id];
-            if (p && typeof p.x === 'number') {
-                const isMe = (id === myId);
-                drawStickman(p.x, p.y, p.color, isMe);
+            if (p) {
+                drawStickman(p.x, p.y, p.color, false);
             }
         }
 
-        const playerCount = Object.keys(players).length;
+        drawStickman(myX, myY, myColor, isHost);
+
+        const playerCount = Object.keys(players).length + 1;
         posStatus.textContent = `📍 (${Math.round(myX)}, ${Math.round(myY)})  |  بازیکنان: ${playerCount}`;
     }
 
     // ============================================================
-    //  منطق WebSocket
+    //  منطق شبکه (PeerJS - اصلاح‌شده)
     // ============================================================
-    function connectWebSocket() {
-        statusText.textContent = '🔄 اتصال به سرور...';
-        socket = new WebSocket(WS_URL);
+    function initPeer() {
+        if (peer) {
+            peer.destroy();
+            peer = null;
+        }
 
-        socket.onopen = () => {
-            isConnected = true;
-            statusText.textContent = '✅ متصل به سرور';
-            console.log('✅ WebSocket متصل شد');
+        isConnecting = true;
+        statusText.textContent = '🔄 راه‌اندازی...';
 
-            // عضویت در اتاق
-            socket.send(JSON.stringify({
-                action: 'join',
-                room: ROOM_NAME,
-                id: myId,
-                data: {
-                    x: myX,
-                    y: myY,
-                    color: myColor
-                }
-            }));
-
-            // هر ۲ ثانیه یک بار، برای جلوگیری از قطع شدن، ping بفرست
-            setInterval(() => {
-                if (socket && socket.readyState === WebSocket.OPEN) {
-                    socket.send(JSON.stringify({ action: 'ping' }));
-                }
-            }, 10000);
-        };
-
-        socket.onmessage = (event) => {
-            try {
-                const msg = JSON.parse(event.data);
-                handleMessage(msg);
-            } catch (e) {
-                console.log('خطا در پردازش پیام:', e);
+        peer = new Peer(undefined, {
+            config: {
+                'iceServers': [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' }
+                ]
             }
-        };
+        });
 
-        socket.onclose = () => {
-            isConnected = false;
-            statusText.textContent = '❌ قطع شد، تلاش مجدد...';
-            console.log('❌ WebSocket قطع شد، تلاش مجدد...');
-            setTimeout(() => {
-                connectWebSocket();
-            }, 3000);
-        };
+        peer.on('open', (id) => {
+            myPeerId = id;
+            isConnecting = false;
+            statusText.textContent = `🆔 ${id}`;
+            console.log('🔑 Peer ID:', id);
 
-        socket.onerror = (err) => {
-            console.error('❌ خطای WebSocket:', err);
-        };
+            // اگر از قبل هاست نبودیم، سعی می‌کنیم به هاست متصل شویم
+            if (!isHost) {
+                tryConnectToHost();
+            } else {
+                // اگر هاست هستیم، خودمان را به لیست اضافه می‌کنیم
+                players[myPeerId] = { x: myX, y: myY, color: myColor };
+                broadcastState();
+            }
+        });
+
+        peer.on('error', (err) => {
+            console.error('❌ Peer error:', err);
+            isConnecting = false;
+
+            if (err.type === 'unavailable-id' || err.message.includes('ID taken')) {
+                // هاست از قبل وجود دارد، پس به عنوان کلاینت وصل می‌شویم
+                if (!isHost) {
+                    statusText.textContent = '🔄 هاست موجود است...';
+                    setTimeout(() => tryConnectToHost(), 1000);
+                }
+            } else if (err.type === 'peer-unavailable') {
+                // هاست پیدا نشد، خودمان هاست می‌شویم
+                becomeHost();
+            } else {
+                // خطای دیگر، تلاش مجدد
+                statusText.textContent = '⚠️ خطا، تلاش مجدد...';
+                setTimeout(() => {
+                    if (!isConnected) initPeer();
+                }, 3000);
+            }
+        });
+
+        peer.on('connection', (conn) => {
+            if (isHost) {
+                handleNewConnection(conn);
+            } else {
+                // اگر کلاینت هستیم، ممکن است کسی به ما وصل شود (نادر)
+                console.log('🔗 اتصال ورودی از:', conn.peer);
+            }
+        });
     }
 
-    function handleMessage(msg) {
-        if (msg.action === 'state') {
-            // دریافت لیست کامل بازیکنان از سرور
-            const data = msg.data || {};
-            // داده‌ها را به‌روز کن
-            for (let id in data) {
-                if (id !== myId) {
-                    players[id] = data[id];
+    function tryConnectToHost() {
+        if (isHost) return;
+        if (hostConnection && hostConnection.open) return;
+        if (isConnecting) return;
+
+        console.log('🔗 تلاش برای اتصال به هاست...');
+        statusText.textContent = '🔗 در حال اتصال به هاست...';
+        isConnecting = true;
+
+        const conn = peer.connect('host', { reliable: true });
+
+        // تایم‌اوت ۱۰ ثانیه برای اتصال
+        const timeoutId = setTimeout(() => {
+            if (!conn.open) {
+                console.log('⏰ تایم‌اوت اتصال به هاست');
+                conn.close();
+                isConnecting = false;
+                if (!isHost && !isConnected) {
+                    becomeHost();
                 }
             }
-            // خودمان را هم در لیست نگه دار
-            if (!players[myId]) {
-                players[myId] = { x: myX, y: myY, color: myColor };
+        }, 10000);
+
+        conn.on('open', () => {
+            clearTimeout(timeoutId);
+            isConnecting = false;
+            isHost = false;
+            hostConnection = conn;
+            isConnected = true;
+            statusText.textContent = '🔗 متصل به هاست';
+            console.log('✅ متصل به هاست شدیم');
+
+            conn.on('data', (data) => {
+                if (data.type === 'state') {
+                    players = data.players || {};
+                    // خودمان را به لیست اضافه می‌کنیم (اگر نبود)
+                    if (!players[myPeerId]) {
+                        players[myPeerId] = { x: myX, y: myY, color: myColor };
+                        sendMyPosition();
+                    }
+                }
+            });
+
+            conn.on('close', () => {
+                console.log('❌ اتصال به هاست قطع شد');
+                hostConnection = null;
+                isConnected = false;
+                statusText.textContent = '❌ هاست قطع شد، تبدیل به هاست جدید...';
+                becomeHost();
+            });
+
+            // ارسال موقعیت اولیه
+            sendMyPosition();
+        });
+
+        conn.on('error', (err) => {
+            clearTimeout(timeoutId);
+            isConnecting = false;
+            console.log('❌ خطا در اتصال به هاست:', err);
+            if (!isHost && !isConnected) {
+                becomeHost();
             }
-        } else if (msg.action === 'update') {
-            // به‌روزرسانی موقعیت یک بازیکن
-            const id = msg.id;
-            if (id && id !== myId) {
-                if (players[id]) {
-                    players[id].x = msg.data.x;
-                    players[id].y = msg.data.y;
-                    players[id].color = msg.data.color || players[id].color;
+        });
+    }
+
+    function becomeHost() {
+        if (isHost) return;
+        if (isConnecting) return;
+
+        console.log('👑 تبدیل به هاست...');
+        statusText.textContent = '👑 تبدیل به هاست...';
+        isHost = true;
+        isConnected = true;
+        isConnecting = false;
+
+        // نابود کردن peer قبلی و ایجاد peer جدید با ID 'host'
+        if (peer) {
+            peer.destroy();
+            peer = null;
+        }
+
+        peer = new Peer('host', {
+            config: {
+                'iceServers': [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' }
+                ]
+            }
+        });
+
+        peer.on('open', (id) => {
+            myPeerId = id;
+            isHost = true;
+            isConnected = true;
+            statusText.textContent = '👑 هاست (سرور)';
+            console.log('✅ ما هاست شدیم با ID:', id);
+            players = {};
+            players[myPeerId] = { x: myX, y: myY, color: myColor };
+            broadcastState();
+        });
+
+        peer.on('error', (err) => {
+            console.error('❌ خطای هاست:', err);
+            if (err.type === 'unavailable-id') {
+                // شخص دیگری هاست شده است، پس به عنوان کلاینت وصل می‌شویم
+                statusText.textContent = '⚠️ هاست دیگری وجود دارد، وصل می‌شویم...';
+                isHost = false;
+                isConnected = false;
+                peer.destroy();
+                peer = null;
+                setTimeout(() => initPeer(), 1000);
+            }
+        });
+
+        peer.on('connection', (conn) => {
+            if (isHost) handleNewConnection(conn);
+        });
+    }
+
+    function handleNewConnection(conn) {
+        const peerId = conn.peer;
+        console.log('🔗 کلاینت جدید متصل شد:', peerId);
+        connections.push(conn);
+
+        conn.on('open', () => {
+            // کلاینت را به لیست بازیکنان اضافه می‌کنیم (اگر نبود)
+            if (!players[peerId]) {
+                players[peerId] = {
+                    x: W/2,
+                    y: H/2,
+                    color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0')
+                };
+            }
+            sendStateToClient(conn);
+            broadcastState();
+        });
+
+        conn.on('data', (data) => {
+            if (data.type === 'position') {
+                if (players[peerId]) {
+                    players[peerId].x = data.x;
+                    players[peerId].y = data.y;
+                    players[peerId].color = data.color || players[peerId].color;
                 } else {
-                    players[id] = { x: msg.data.x, y: msg.data.y, color: msg.data.color || '#ff5722' };
+                    players[peerId] = { x: data.x, y: data.y, color: data.color || '#ff5722' };
                 }
+                broadcastState();
             }
-        } else if (msg.action === 'leave') {
-            // بازیکنی خارج شد
-            const id = msg.id;
-            if (id && id !== myId) {
-                delete players[id];
-                console.log('❌ بازیکن خارج شد:', id);
+        });
+
+        conn.on('close', () => {
+            console.log('❌ کلاینت قطع شد:', peerId);
+            connections = connections.filter(c => c.peer !== peerId);
+            delete players[peerId];
+            broadcastState();
+        });
+    }
+
+    function sendStateToClient(conn) {
+        if (conn.open) {
+            conn.send({ type: 'state', players: players });
+        }
+    }
+
+    function broadcastState() {
+        if (!isHost) return;
+        for (let conn of connections) {
+            if (conn.open) {
+                conn.send({ type: 'state', players: players });
             }
         }
     }
 
     function sendMyPosition() {
-        if (!isConnected || !socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({
-            action: 'update',
-            room: ROOM_NAME,
-            id: myId,
-            data: {
+        if (hostConnection && hostConnection.open) {
+            hostConnection.send({
+                type: 'position',
                 x: myX,
                 y: myY,
                 color: myColor
-            }
-        }));
+            });
+        }
     }
 
     // ============================================================
@@ -375,11 +525,18 @@
         myX = Math.max(PADDING + MARGIN, Math.min(W - PADDING - MARGIN, myX));
         myY = Math.max(PADDING + MARGIN, Math.min(H - PADDING - MARGIN, myY));
 
-        // به‌روزرسانی خودمان در لیست local
-        players[myId] = { x: myX, y: myY, color: myColor };
-
-        // ارسال به سرور
-        sendMyPosition();
+        if (isHost) {
+            if (players[myPeerId]) {
+                players[myPeerId].x = myX;
+                players[myPeerId].y = myY;
+                players[myPeerId].color = myColor;
+            } else {
+                players[myPeerId] = { x: myX, y: myY, color: myColor };
+            }
+            broadcastState();
+        } else {
+            sendMyPosition();
+        }
     }
 
     function gameLoop() {
@@ -457,17 +614,17 @@
     // ============================================================
     //  راه‌اندازی نهایی
     // ============================================================
-    connectWebSocket();
+    initPeer();
     gameLoop();
 
-    // ارسال موقعیت هر 50 میلی‌ثانیه
+    // ارسال موقعیت به‌صورت دوره‌ای برای کلاینت‌ها
     setInterval(() => {
-        if (isConnected) {
+        if (!isHost && hostConnection && hostConnection.open) {
             sendMyPosition();
         }
     }, 50);
 
-    console.log('🎮 بازی با WebSocket عمومی راه‌اندازی شد.');
+    console.log('🎮 بازی با PeerJS (نسخه اصلاح‌شده) راه‌اندازی شد.');
 </script>
 </body>
 </html>
