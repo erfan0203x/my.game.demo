@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>🎮 استیکمن آنلاین (WebSocket)</title>
+    <title>🎮 استیکمن آنلاین</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+        * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
         body {
             background: #1a1a2e;
             height: 100vh;
@@ -100,26 +101,6 @@
             color: #cbd5e1;
             font-size: 13px;
         }
-        .btn-restart {
-            background: #4caf50;
-            color: white;
-            border: none;
-            padding: 6px 18px;
-            border-radius: 30px;
-            font-size: 14px;
-            font-weight: bold;
-            cursor: pointer;
-            box-shadow: 0 4px 0 #2e7d32;
-            transition: 0.1s ease;
-        }
-        .btn-restart:hover {
-            background: #66bb6a;
-            transform: translateY(-2px);
-        }
-        .btn-restart:active {
-            transform: translateY(4px);
-            box-shadow: 0 2px 0 #2e7d32;
-        }
         @media (max-width: 650px) {
             .game-wrapper { padding: 10px; border-radius: 20px; }
             .joystick-zone { width: 100px; height: 100px; bottom: 20px; left: 20px; }
@@ -132,6 +113,19 @@
             padding: 4px 12px;
             border-radius: 20px;
             font-size: 13px;
+        }
+        .try-again-btn {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 6px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 13px;
+            margin-top: 5px;
+        }
+        .try-again-btn:hover {
+            background: #45a049;
         }
     </style>
 </head>
@@ -148,24 +142,17 @@
         <div>🕹️ <span id="statusText">در حال اتصال...</span></div>
         <div class="badge">⌨️ فلش‌ها / WASD</div>
         <div id="posStatus">📍 (300, 200)</div>
-        <button class="btn-restart" id="restartBtn">🔄 اتصال مجدد</button>
     </div>
 </div>
 
 <script>
     // ============================================================
-    //  تنظیمات WebSocket (با یک سرویس تست معتبرتر)
+    //  متغیرهای اصلی
     // ============================================================
-    const ROOM = 'stickman-game';
-    // استفاده از یک WebSocket عمومی دیگر برای تست
-    const WS_URL = 'wss://echo.websocket.org';  // این یک سرور تست ساده است
-
-    // ---- متغیرهای اصلی ----
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     const posStatus = document.getElementById('posStatus');
     const statusText = document.getElementById('statusText');
-    const restartBtn = document.getElementById('restartBtn');
 
     const W = 600, H = 400;
     const PADDING = 30;
@@ -174,13 +161,24 @@
 
     let myX = W/2, myY = H/2;
     let myColor = '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0');
-    let myId = 'p' + Math.random().toString(36).substr(2, 6);
+    let myId = null;
 
-    let players = {};
+    let peer = null;
     let isHost = false;
+    let connections = [];
+    let players = {};
+    let hostConnection = null;
     let isConnected = false;
-    let socket = null;
-    let isConnecting = false;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT = 5;
+
+    // لیست سرورهای سیگنالینگ
+    const SIGNALING_SERVERS = [
+        'https://0.peerjs.com',
+        'https://1.peerjs.com',
+        'https://peerjs.com'
+    ];
+    let currentServerIndex = 0;
 
     // ---- جوی‌استیک ----
     const joystickZone = document.getElementById('joystickZone');
@@ -288,126 +286,217 @@
     }
 
     // ============================================================
-    //  WebSocket (با مدیریت خطای بهتر)
+    //  منطق PeerJS
     // ============================================================
-    function connectWS() {
-        if (isConnecting) return;
-        if (socket && socket.readyState === WebSocket.OPEN) return;
-
-        isConnecting = true;
-        statusText.textContent = '🔄 اتصال به سرور...';
-
-        try {
-            socket = new WebSocket(WS_URL);
-
-            socket.onopen = () => {
-                isConnecting = false;
-                isConnected = true;
-                statusText.textContent = '✅ متصل به سرور';
-                console.log('✅ WebSocket متصل شد');
-
-                // بعد از اتصال، خودمان را به عنوان هاست معرفی می‌کنیم (اگر کسی نبود)
-                setTimeout(() => {
-                    if (!isHost && Object.keys(players).length === 0) {
-                        becomeHost();
-                    }
-                }, 1000);
-            };
-
-            socket.onmessage = (e) => {
-                try {
-                    // چون سرور echo است، فقط داده را برمی‌گرداند
-                    const data = JSON.parse(e.data);
-                    console.log('📩 پیام دریافت شد:', data);
-                    
-                    // اگر پیام از خودمان باشد، نادیده بگیر
-                    if (data.id === myId) return;
-
-                    // اگر پیام حاوی اطلاعات بازیکن باشد
-                    if (data.type === 'position' || data.action === 'update') {
-                        const id = data.id || data.from;
-                        if (id && id !== myId) {
-                            if (players[id]) {
-                                players[id].x = data.x || data.data?.x;
-                                players[id].y = data.y || data.data?.y;
-                                players[id].color = data.color || data.data?.color || players[id].color;
-                                players[id].isHost = data.isHost || data.data?.isHost || false;
-                            } else {
-                                players[id] = {
-                                    x: data.x || data.data?.x || W/2,
-                                    y: data.y || data.data?.y || H/2,
-                                    color: data.color || data.data?.color || '#ff5722',
-                                    isHost: data.isHost || data.data?.isHost || false
-                                };
-                            }
-                        }
-                    } else if (data.action === 'host_elected' || data.type === 'host') {
-                        if (data.id === myId) {
-                            becomeHost();
-                        }
-                    }
-                } catch (err) {
-                    // اگر پیام JSON نبود، نادیده بگیر
-                }
-            };
-
-            socket.onclose = () => {
-                isConnecting = false;
-                isConnected = false;
-                statusText.textContent = '❌ قطع شد، دکمه اتصال مجدد را بزنید';
-                console.log('❌ WebSocket قطع شد');
-            };
-
-            socket.onerror = (err) => {
-                isConnecting = false;
-                console.error('❌ خطای WebSocket:', err);
-                // خطا را نادیده می‌گیریم چون onclose بعداً صدا زده می‌شود
-            };
-
-        } catch (err) {
-            isConnecting = false;
-            statusText.textContent = '❌ خطا در اتصال';
-            console.error('❌ خطا:', err);
+    function startPeer() {
+        if (peer) {
+            peer.destroy();
+            peer = null;
         }
+
+        const serverUrl = SIGNALING_SERVERS[currentServerIndex];
+        statusText.textContent = `🔄 اتصال به سرور ${currentServerIndex + 1}/${SIGNALING_SERVERS.length}...`;
+
+        peer = new Peer(undefined, {
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' },
+                    { urls: 'turn:relay1.expressturn.com:3478', username: 'efgh', credential: 'abcdefgh' }
+                ]
+            },
+            host: serverUrl.replace('https://', ''),
+            path: '/',
+            port: 443,
+            secure: true
+        });
+
+        peer.on('open', (id) => {
+            myId = id;
+            isConnected = true;
+            reconnectAttempts = 0;
+            statusText.textContent = `✅ متصل (${id})`;
+            console.log('✅ Peer ID:', id);
+
+            // اگر قبلاً هاست نبودیم، سعی می‌کنیم به هاست وصل شویم
+            if (!isHost) {
+                tryConnectToHost();
+            } else {
+                players[myId] = { x: myX, y: myY, color: myColor, isHost: true };
+                broadcastState();
+            }
+        });
+
+        peer.on('error', (err) => {
+            console.error('❌ Peer error:', err);
+            if (err.type === 'unavailable-id' || err.message.includes('ID taken')) {
+                if (!isHost) {
+                    statusText.textContent = '🔄 هاست موجود، اتصال...';
+                    setTimeout(() => tryConnectToHost(), 1000);
+                }
+            } else if (err.type === 'peer-unavailable') {
+                becomeHost();
+            } else if (err.type === 'disconnected' || err.message.includes('disconnected')) {
+                // تلاش مجدد با سرور بعدی
+                currentServerIndex = (currentServerIndex + 1) % SIGNALING_SERVERS.length;
+                statusText.textContent = `🔄 تغییر سرور...`;
+                setTimeout(() => startPeer(), 2000);
+            } else {
+                statusText.textContent = `⚠️ خطا: ${err.message || err.type}`;
+                if (reconnectAttempts < MAX_RECONNECT) {
+                    reconnectAttempts++;
+                    setTimeout(() => startPeer(), 3000);
+                } else {
+                    statusText.innerHTML = '❌ <span class="error-msg">اتصال ممکن نیست</span>';
+                }
+            }
+        });
+
+        peer.on('connection', (conn) => {
+            if (isHost) {
+                handleNewConnection(conn);
+            } else {
+                console.log('🔗 اتصال ورودی از:', conn.peer);
+                // اگر کلاینت هستیم و کسی به ما وصل شد، یعنی ما هاست شدیم!
+                becomeHost();
+            }
+        });
+
+        // تایم‌اوت برای اتصال
+        setTimeout(() => {
+            if (!isConnected && !isHost) {
+                statusText.textContent = '⏳ اتصال طولانی شد، تبدیل به هاست...';
+                becomeHost();
+            }
+        }, 10000);
+    }
+
+    function tryConnectToHost() {
+        if (isHost) return;
+        if (hostConnection && hostConnection.open) return;
+
+        statusText.textContent = '🔗 در حال اتصال به هاست...';
+        const conn = peer.connect('host', { reliable: true });
+
+        const timeout = setTimeout(() => {
+            if (!conn.open) {
+                conn.close();
+                becomeHost();
+            }
+        }, 8000);
+
+        conn.on('open', () => {
+            clearTimeout(timeout);
+            hostConnection = conn;
+            isConnected = true;
+            statusText.textContent = '🔗 متصل به هاست';
+            console.log('✅ متصل به هاست شدیم');
+
+            conn.on('data', (data) => {
+                if (data.type === 'state') {
+                    players = data.players || {};
+                    if (!players[myId]) {
+                        players[myId] = { x: myX, y: myY, color: myColor, isHost: false };
+                        sendMyPos();
+                    }
+                }
+            });
+
+            conn.on('close', () => {
+                hostConnection = null;
+                isConnected = false;
+                statusText.textContent = '❌ هاست قطع شد، تبدیل به هاست...';
+                becomeHost();
+            });
+
+            sendMyPos();
+        });
+
+        conn.on('error', (err) => {
+            clearTimeout(timeout);
+            console.log('❌ خطا در اتصال به هاست:', err);
+            becomeHost();
+        });
     }
 
     function becomeHost() {
         if (isHost) return;
-        if (!isConnected) return;
+        if (!peer) return;
 
         isHost = true;
+        isConnected = true;
         statusText.textContent = '👑 هاست (سرور)';
         console.log('✅ ما هاست شدیم');
 
+        players = {};
         players[myId] = { x: myX, y: myY, color: myColor, isHost: true };
-        sendMyPos();
+        broadcastState();
+    }
 
-        // اعلام به همه
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({
-                action: 'host_elected',
-                type: 'host',
-                id: myId,
-                room: ROOM
-            }));
+    function handleNewConnection(conn) {
+        const peerId = conn.peer;
+        console.log('🔗 کلاینت جدید:', peerId);
+        connections.push(conn);
+
+        conn.on('open', () => {
+            if (!players[peerId]) {
+                players[peerId] = {
+                    x: W/2,
+                    y: H/2,
+                    color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0'),
+                    isHost: false
+                };
+            }
+            sendStateToClient(conn);
+            broadcastState();
+        });
+
+        conn.on('data', (data) => {
+            if (data.type === 'position') {
+                if (players[peerId]) {
+                    players[peerId].x = data.x;
+                    players[peerId].y = data.y;
+                    players[peerId].color = data.color || players[peerId].color;
+                } else {
+                    players[peerId] = { x: data.x, y: data.y, color: data.color || '#ff5722', isHost: false };
+                }
+                broadcastState();
+            }
+        });
+
+        conn.on('close', () => {
+            console.log('❌ کلاینت قطع شد:', peerId);
+            connections = connections.filter(c => c.peer !== peerId);
+            delete players[peerId];
+            broadcastState();
+        });
+    }
+
+    function sendStateToClient(conn) {
+        if (conn.open) {
+            conn.send({ type: 'state', players: players });
+        }
+    }
+
+    function broadcastState() {
+        if (!isHost) return;
+        for (let conn of connections) {
+            if (conn.open) {
+                conn.send({ type: 'state', players: players });
+            }
         }
     }
 
     function sendMyPos() {
-        if (!isConnected || !socket || socket.readyState !== WebSocket.OPEN) return;
-        
-        const data = {
-            action: 'update',
-            type: 'position',
-            id: myId,
-            room: ROOM,
-            x: myX,
-            y: myY,
-            color: myColor,
-            isHost: isHost
-        };
-        
-        socket.send(JSON.stringify(data));
+        if (hostConnection && hostConnection.open) {
+            hostConnection.send({
+                type: 'position',
+                x: myX,
+                y: myY,
+                color: myColor
+            });
+        }
     }
 
     // ============================================================
@@ -430,8 +519,18 @@
         myX = Math.max(PADDING + MARGIN, Math.min(W - PADDING - MARGIN, myX));
         myY = Math.max(PADDING + MARGIN, Math.min(H - PADDING - MARGIN, myY));
 
-        players[myId] = { x: myX, y: myY, color: myColor, isHost: isHost };
-        sendMyPos();
+        if (isHost) {
+            if (players[myId]) {
+                players[myId].x = myX;
+                players[myId].y = myY;
+                players[myId].color = myColor;
+            } else {
+                players[myId] = { x: myX, y: myY, color: myColor, isHost: true };
+            }
+            broadcastState();
+        } else {
+            sendMyPos();
+        }
     }
 
     function gameLoop() {
@@ -441,7 +540,7 @@
     }
 
     // ============================================================
-    //  رویدادهای جوی‌استیک و کیبورد
+    //  رویدادها
     // ============================================================
     function handlePointerStart(e) {
         e.preventDefault();
@@ -509,30 +608,16 @@
     // ============================================================
     //  راه‌اندازی
     // ============================================================
-    connectWS();
+    startPeer();
     gameLoop();
 
-    // دکمه اتصال مجدد
-    restartBtn.addEventListener('click', () => {
-        if (socket) {
-            try { socket.close(); } catch(e) {}
-            socket = null;
-        }
-        isConnected = false;
-        isHost = false;
-        players = {};
-        players[myId] = { x: myX, y: myY, color: myColor, isHost: false };
-        connectWS();
-    });
-
-    // ارسال موقعیت هر 50 میلی‌ثانیه
     setInterval(() => {
-        if (isConnected) {
+        if (!isHost && hostConnection && hostConnection.open) {
             sendMyPos();
         }
     }, 50);
 
-    console.log('🎮 بازی با WebSocket (نسخه پایدار) راه‌اندازی شد.');
+    console.log('🎮 بازی با PeerJS (نسخه نهایی) راه‌اندازی شد.');
 </script>
 </body>
 </html>
