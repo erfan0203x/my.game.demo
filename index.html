@@ -244,7 +244,7 @@
     }
 
     // ============================================================
-    //  منطق شبکه (بهبود یافته برای اتصال کامپیوتر و گوشی)
+    //  منطق شبکه (نسخه نهایی با مدیریت بهتر هاست)
     // ============================================================
     function initPeer() {
         if (peer) {
@@ -266,27 +266,35 @@
             myPeerId = id;
             statusText.textContent = `🆔 ${id}`;
             console.log('🔑 Peer ID:', id);
-            if (isHost) {
-                players[myPeerId] = { x: myX, y: myY, color: myColor };
-                broadcastState();
-            } else {
-                tryConnectToHost();
-            }
+
+            // ابتدا سعی می‌کنیم به هاست متصل شویم
+            tryConnectToHost();
+
+            // اگر هاست وجود نداشته باشد، بعد از 3 ثانیه خودمان هاست می‌شویم
+            setTimeout(() => {
+                if (!isHost && !hostConnection && !isConnected) {
+                    console.log('⏰ هاست پیدا نشد، تبدیل به هاست...');
+                    becomeHost();
+                }
+            }, 3000);
         });
 
         peer.on('error', (err) => {
             console.error('❌ Peer error:', err);
             if (err.type === 'unavailable-id' || err.message.includes('ID taken')) {
+                // هاست از قبل وجود دارد، سعی می‌کنیم به آن وصل شویم
                 statusText.textContent = '🔄 هاست موجود است، در حال اتصال...';
                 if (!isHost) {
                     setTimeout(() => tryConnectToHost(), 1000);
                 }
             } else if (err.type === 'peer-unavailable') {
+                // هاست پیدا نشد، خودمان هاست می‌شویم
                 becomeHost();
             } else {
-                setTimeout(() => {
-                    if (!isConnected) initPeer();
-                }, 3000);
+                // خطای دیگر
+                if (!isConnected) {
+                    setTimeout(() => initPeer(), 3000);
+                }
             }
         });
 
@@ -297,14 +305,6 @@
                 console.log('🔗 اتصال ورودی غیرمنتظره از:', conn.peer);
             }
         });
-
-        // اگر بعد از 5 ثانیه وصل نشد، هاست می‌شویم
-        setTimeout(() => {
-            if (!isHost && !hostConnection && !isConnected) {
-                console.log('⏰ زمان اتصال به هاست تمام شد، تبدیل به هاست...');
-                becomeHost();
-            }
-        }, 5000);
     }
 
     function tryConnectToHost() {
@@ -322,7 +322,7 @@
                     becomeHost();
                 }
             }
-        }, 5000);
+        }, 4000);
 
         conn.on('open', () => {
             clearTimeout(timeout);
