@@ -159,6 +159,7 @@
     let socket = null;
     let reconnectAttempts = 0;
     const MAX_RECONNECT = 5;
+    let hostCheckDone = false;
 
     // ---- جوی‌استیک ----
     const joystickZone = document.getElementById('joystickZone');
@@ -300,8 +301,23 @@
 
             // بعد از 3 ثانیه، اگر کسی نبود، هاست می‌شویم
             setTimeout(() => {
-                if (!isHost && Object.keys(players).length === 1 && players[myId]) {
-                    becomeHost();
+                if (!hostCheckDone) {
+                    hostCheckDone = true;
+                    // بررسی کنیم که آیا هاست وجود دارد یا خیر
+                    let hostExists = false;
+                    for (let id in players) {
+                        if (players[id].isHost) {
+                            hostExists = true;
+                            break;
+                        }
+                    }
+                    // اگر هاست وجود ندارد و ما هاست نیستیم
+                    if (!hostExists && !isHost) {
+                        // اگر تنها هستیم، هاست می‌شویم
+                        if (Object.keys(players).length <= 1) {
+                            becomeHost();
+                        }
+                    }
                 }
             }, 3000);
 
@@ -332,12 +348,11 @@
                 if (!isConnected) {
                     connectWS();
                 }
-            }, 3000 * reconnectAttempts);
+            }, 3000 * Math.min(reconnectAttempts, 5));
         };
 
         socket.onerror = (err) => {
             console.error('❌ خطای WebSocket:', err);
-            // خطا را نادیده می‌گیریم چون onclose بعداً صدا زده می‌شود
         };
     }
 
@@ -355,24 +370,28 @@
 
             // بررسی هاست
             let hostExists = false;
+            let hostId = null;
             for (let id in players) {
                 if (players[id].isHost) {
                     hostExists = true;
+                    hostId = id;
                     break;
                 }
             }
+
             if (!hostExists && !isHost && Object.keys(players).length > 0) {
+                // اگر هاست وجود ندارد و کسی هست، ما هاست می‌شویم
                 becomeHost();
-            }
-            if (isHost) {
-                for (let id in players) {
-                    if (id !== myId && players[id].isHost) {
-                        isHost = false;
-                        players[myId].isHost = false;
-                        statusText.textContent = '🔗 متصل به هاست';
-                        break;
-                    }
-                }
+            } else if (hostExists && hostId !== myId && isHost) {
+                // اگر کسی دیگر هاست شده و ما هاست بودیم، هاست را رها می‌کنیم
+                isHost = false;
+                players[myId].isHost = false;
+                statusText.textContent = '🔗 متصل به هاست';
+            } else if (hostExists && hostId === myId && !isHost) {
+                // اگر خودمان هاست هستیم ولی پرچم isHost false است
+                isHost = true;
+                players[myId].isHost = true;
+                statusText.textContent = '👑 هاست (سرور)';
             }
 
         } else if (msg.action === 'update') {
@@ -559,7 +578,7 @@
         }
     }, 50);
 
-    console.log('🎮 بازی با WebSocket (نسخه پایدار) راه‌اندازی شد.');
+    console.log('🎮 بازی با WebSocket (نسخه نهایی) راه‌اندازی شد.');
 </script>
 </body>
 </html>
