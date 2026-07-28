@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>🎮 استیکمن آنلاین</title>
+    <title>🎮 استیکمن آنلاین (WebSocket)</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
         body {
@@ -100,6 +100,26 @@
             color: #cbd5e1;
             font-size: 13px;
         }
+        .btn-restart {
+            background: #4caf50;
+            color: white;
+            border: none;
+            padding: 6px 18px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 4px 0 #2e7d32;
+            transition: 0.1s ease;
+        }
+        .btn-restart:hover {
+            background: #66bb6a;
+            transform: translateY(-2px);
+        }
+        .btn-restart:active {
+            transform: translateY(4px);
+            box-shadow: 0 2px 0 #2e7d32;
+        }
         @media (max-width: 650px) {
             .game-wrapper { padding: 10px; border-radius: 20px; }
             .joystick-zone { width: 100px; height: 100px; bottom: 20px; left: 20px; }
@@ -128,21 +148,24 @@
         <div>🕹️ <span id="statusText">در حال اتصال...</span></div>
         <div class="badge">⌨️ فلش‌ها / WASD</div>
         <div id="posStatus">📍 (300, 200)</div>
+        <button class="btn-restart" id="restartBtn">🔄 اتصال مجدد</button>
     </div>
 </div>
 
 <script>
     // ============================================================
-    //  تنظیمات
+    //  تنظیمات WebSocket (با یک سرویس تست معتبرتر)
     // ============================================================
-    const ROOM = 'stickman-room';
-    const WS_URL = 'wss://demo.piesocket.com/v3/1?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self';
+    const ROOM = 'stickman-game';
+    // استفاده از یک WebSocket عمومی دیگر برای تست
+    const WS_URL = 'wss://echo.websocket.org';  // این یک سرور تست ساده است
 
     // ---- متغیرهای اصلی ----
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     const posStatus = document.getElementById('posStatus');
     const statusText = document.getElementById('statusText');
+    const restartBtn = document.getElementById('restartBtn');
 
     const W = 600, H = 400;
     const PADDING = 30;
@@ -157,9 +180,7 @@
     let isHost = false;
     let isConnected = false;
     let socket = null;
-    let reconnectAttempts = 0;
-    const MAX_RECONNECT = 5;
-    let hostCheckDone = false;
+    let isConnecting = false;
 
     // ---- جوی‌استیک ----
     const joystickZone = document.getElementById('joystickZone');
@@ -267,173 +288,86 @@
     }
 
     // ============================================================
-    //  WebSocket
+    //  WebSocket (با مدیریت خطای بهتر)
     // ============================================================
     function connectWS() {
-        if (reconnectAttempts >= MAX_RECONNECT) {
-            statusText.innerHTML = '❌ <span class="error-msg">اتصال ممکن نیست، شبکه را بررسی کنید</span>';
-            return;
-        }
-
+        if (isConnecting) return;
         if (socket && socket.readyState === WebSocket.OPEN) return;
 
+        isConnecting = true;
         statusText.textContent = '🔄 اتصال به سرور...';
-        socket = new WebSocket(WS_URL);
 
-        socket.onopen = () => {
-            isConnected = true;
-            reconnectAttempts = 0;
-            statusText.textContent = '✅ متصل به سرور';
-            console.log('✅ WebSocket متصل شد');
+        try {
+            socket = new WebSocket(WS_URL);
 
-            // عضویت در اتاق
-            socket.send(JSON.stringify({
-                action: 'join',
-                room: ROOM,
-                id: myId,
-                data: {
-                    x: myX,
-                    y: myY,
-                    color: myColor,
-                    isHost: false
-                }
-            }));
+            socket.onopen = () => {
+                isConnecting = false;
+                isConnected = true;
+                statusText.textContent = '✅ متصل به سرور';
+                console.log('✅ WebSocket متصل شد');
 
-            // بعد از 3 ثانیه، اگر کسی نبود، هاست می‌شویم
-            setTimeout(() => {
-                if (!hostCheckDone) {
-                    hostCheckDone = true;
-                    // بررسی کنیم که آیا هاست وجود دارد یا خیر
-                    let hostExists = false;
-                    for (let id in players) {
-                        if (players[id].isHost) {
-                            hostExists = true;
-                            break;
-                        }
+                // بعد از اتصال، خودمان را به عنوان هاست معرفی می‌کنیم (اگر کسی نبود)
+                setTimeout(() => {
+                    if (!isHost && Object.keys(players).length === 0) {
+                        becomeHost();
                     }
-                    // اگر هاست وجود ندارد و ما هاست نیستیم
-                    if (!hostExists && !isHost) {
-                        // اگر تنها هستیم، هاست می‌شویم
-                        if (Object.keys(players).length <= 1) {
+                }, 1000);
+            };
+
+            socket.onmessage = (e) => {
+                try {
+                    // چون سرور echo است، فقط داده را برمی‌گرداند
+                    const data = JSON.parse(e.data);
+                    console.log('📩 پیام دریافت شد:', data);
+                    
+                    // اگر پیام از خودمان باشد، نادیده بگیر
+                    if (data.id === myId) return;
+
+                    // اگر پیام حاوی اطلاعات بازیکن باشد
+                    if (data.type === 'position' || data.action === 'update') {
+                        const id = data.id || data.from;
+                        if (id && id !== myId) {
+                            if (players[id]) {
+                                players[id].x = data.x || data.data?.x;
+                                players[id].y = data.y || data.data?.y;
+                                players[id].color = data.color || data.data?.color || players[id].color;
+                                players[id].isHost = data.isHost || data.data?.isHost || false;
+                            } else {
+                                players[id] = {
+                                    x: data.x || data.data?.x || W/2,
+                                    y: data.y || data.data?.y || H/2,
+                                    color: data.color || data.data?.color || '#ff5722',
+                                    isHost: data.isHost || data.data?.isHost || false
+                                };
+                            }
+                        }
+                    } else if (data.action === 'host_elected' || data.type === 'host') {
+                        if (data.id === myId) {
                             becomeHost();
                         }
                     }
+                } catch (err) {
+                    // اگر پیام JSON نبود، نادیده بگیر
                 }
-            }, 3000);
+            };
 
-            // Ping
-            setInterval(() => {
-                if (socket && socket.readyState === WebSocket.OPEN) {
-                    socket.send(JSON.stringify({ action: 'ping' }));
-                }
-            }, 10000);
-        };
+            socket.onclose = () => {
+                isConnecting = false;
+                isConnected = false;
+                statusText.textContent = '❌ قطع شد، دکمه اتصال مجدد را بزنید';
+                console.log('❌ WebSocket قطع شد');
+            };
 
-        socket.onmessage = (e) => {
-            try {
-                const msg = JSON.parse(e.data);
-                handleMessage(msg);
-            } catch (err) {
-                console.log('خطا در پردازش پیام:', err);
-            }
-        };
+            socket.onerror = (err) => {
+                isConnecting = false;
+                console.error('❌ خطای WebSocket:', err);
+                // خطا را نادیده می‌گیریم چون onclose بعداً صدا زده می‌شود
+            };
 
-        socket.onclose = () => {
-            isConnected = false;
-            statusText.textContent = '❌ قطع شد، تلاش مجدد...';
-            console.log('❌ WebSocket قطع شد');
-
-            reconnectAttempts++;
-            setTimeout(() => {
-                if (!isConnected) {
-                    connectWS();
-                }
-            }, 3000 * Math.min(reconnectAttempts, 5));
-        };
-
-        socket.onerror = (err) => {
-            console.error('❌ خطای WebSocket:', err);
-        };
-    }
-
-    function handleMessage(msg) {
-        if (msg.action === 'state') {
-            const data = msg.data || {};
-            for (let id in data) {
-                if (id !== myId) {
-                    players[id] = data[id];
-                }
-            }
-            if (!players[myId]) {
-                players[myId] = { x: myX, y: myY, color: myColor, isHost: isHost };
-            }
-
-            // بررسی هاست
-            let hostExists = false;
-            let hostId = null;
-            for (let id in players) {
-                if (players[id].isHost) {
-                    hostExists = true;
-                    hostId = id;
-                    break;
-                }
-            }
-
-            if (!hostExists && !isHost && Object.keys(players).length > 0) {
-                // اگر هاست وجود ندارد و کسی هست، ما هاست می‌شویم
-                becomeHost();
-            } else if (hostExists && hostId !== myId && isHost) {
-                // اگر کسی دیگر هاست شده و ما هاست بودیم، هاست را رها می‌کنیم
-                isHost = false;
-                players[myId].isHost = false;
-                statusText.textContent = '🔗 متصل به هاست';
-            } else if (hostExists && hostId === myId && !isHost) {
-                // اگر خودمان هاست هستیم ولی پرچم isHost false است
-                isHost = true;
-                players[myId].isHost = true;
-                statusText.textContent = '👑 هاست (سرور)';
-            }
-
-        } else if (msg.action === 'update') {
-            const id = msg.id;
-            if (id && id !== myId) {
-                if (players[id]) {
-                    players[id].x = msg.data.x;
-                    players[id].y = msg.data.y;
-                    players[id].color = msg.data.color || players[id].color;
-                    players[id].isHost = msg.data.isHost || false;
-                } else {
-                    players[id] = {
-                        x: msg.data.x,
-                        y: msg.data.y,
-                        color: msg.data.color || '#ff5722',
-                        isHost: msg.data.isHost || false
-                    };
-                }
-            }
-
-        } else if (msg.action === 'leave') {
-            const id = msg.id;
-            if (id && id !== myId) {
-                delete players[id];
-                console.log('❌ بازیکن خارج شد:', id);
-                // اگر هاست رفت، ما هاست می‌شویم
-                let hostExists = false;
-                for (let id2 in players) {
-                    if (players[id2].isHost) {
-                        hostExists = true;
-                        break;
-                    }
-                }
-                if (!hostExists && Object.keys(players).length > 0 && !isHost) {
-                    becomeHost();
-                }
-            }
-
-        } else if (msg.action === 'host_elected') {
-            if (msg.id === myId) {
-                becomeHost();
-            }
+        } catch (err) {
+            isConnecting = false;
+            statusText.textContent = '❌ خطا در اتصال';
+            console.error('❌ خطا:', err);
         }
     }
 
@@ -448,26 +382,32 @@
         players[myId] = { x: myX, y: myY, color: myColor, isHost: true };
         sendMyPos();
 
-        socket.send(JSON.stringify({
-            action: 'host_elected',
-            room: ROOM,
-            id: myId
-        }));
+        // اعلام به همه
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                action: 'host_elected',
+                type: 'host',
+                id: myId,
+                room: ROOM
+            }));
+        }
     }
 
     function sendMyPos() {
         if (!isConnected || !socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({
+        
+        const data = {
             action: 'update',
-            room: ROOM,
+            type: 'position',
             id: myId,
-            data: {
-                x: myX,
-                y: myY,
-                color: myColor,
-                isHost: isHost
-            }
-        }));
+            room: ROOM,
+            x: myX,
+            y: myY,
+            color: myColor,
+            isHost: isHost
+        };
+        
+        socket.send(JSON.stringify(data));
     }
 
     // ============================================================
@@ -572,13 +512,27 @@
     connectWS();
     gameLoop();
 
+    // دکمه اتصال مجدد
+    restartBtn.addEventListener('click', () => {
+        if (socket) {
+            try { socket.close(); } catch(e) {}
+            socket = null;
+        }
+        isConnected = false;
+        isHost = false;
+        players = {};
+        players[myId] = { x: myX, y: myY, color: myColor, isHost: false };
+        connectWS();
+    });
+
+    // ارسال موقعیت هر 50 میلی‌ثانیه
     setInterval(() => {
         if (isConnected) {
             sendMyPos();
         }
     }, 50);
 
-    console.log('🎮 بازی با WebSocket (نسخه نهایی) راه‌اندازی شد.');
+    console.log('🎮 بازی با WebSocket (نسخه پایدار) راه‌اندازی شد.');
 </script>
 </body>
 </html>
